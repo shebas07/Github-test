@@ -1,0 +1,5506 @@
+CREATE OR REPLACE PACKAGE BODY VINAMILK_RELEASE.PKG_TB_REPORT2 AS
+
+ 
+
+ 
+
+PROCEDURE PROC_VT1(res OUT SYS_REFCURSOR , lstShopId NVARCHAR2, gsnppId
+NUMBER, staffId NUMBER, p_DateStr STRING) AS
+
+  p_Date date;
+
+  BEGIN
+
+    p_Date := to_date(p_DateStr, 'dd/mm/yyyy');
+
+    if trunc(sysdate) <= trunc(p_Date) then
+
+      OPEN res FOR
+
+          WITH
+
+          p_shop AS
+
+          (
+
+          SELECT shop_id
+
+          FROM shop
+
+            CONNECT BY PRIOR shop_id = parent_shop_id
+
+            START WITH shop_id      IN
+
+            (SELECT shop_id
+
+            FROM shop
+
+            WHERE shop_id IN
+
+              (SELECT regexp_substr(lstShopId,'[^,]+', 1, level)
+
+              FROM dual
+
+                CONNECT BY regexp_substr(lstShopId, '[^,]+', 1, level)
+IS NOT NULL
+
+              )
+
+            )
+
+          GROUP BY shop_id
+
+          ),
+
+          STAFF_VISIT AS --- KHACH HANG GHE THAM THEO KE HOACH NGAY
+
+              (SELECT VP.STAFF_ID,
+
+                CASE
+
+                  WHEN TRIM(TO_CHAR(p_Date,'DAY')) = 'MONDAY'
+
+                  THEN SUM(MONDAY)
+
+                  WHEN TRIM(TO_CHAR(p_Date,'DAY')) = 'TUESDAY'
+
+                  THEN SUM(TUESDAY)
+
+                  WHEN TRIM(TO_CHAR(p_Date,'DAY')) = 'WEDNESDAY'
+
+                  THEN SUM(WEDNESDAY)
+
+                  WHEN TRIM(TO_CHAR(p_Date,'DAY')) = 'THURSDAY'
+
+                  THEN SUM(THURSDAY)
+
+                  WHEN TRIM(TO_CHAR(p_Date,'DAY')) = 'FRIDAY'
+
+                  THEN SUM(FRIDAY)
+
+                  WHEN TRIM(TO_CHAR(p_Date,'DAY')) = 'SATURDAY'
+
+                  THEN SUM(SATURDAY)
+
+                  ELSE SUM(SUNDAY)
+
+                END AS KHACHHANGDUKIENGHETHAM
+
+              FROM VISIT_PLAN VP JOIN CUSTOMER CUS ON VP.CUSTOMER_ID =
+CUS.CUSTOMER_ID
+
+              JOIN STAFF S ON S.STAFF_ID = VP.STAFF_ID
+
+              join shop sh on sh.shop_id = s.shop_id
+
+              where
+
+                vp.start_date <= p_date
+
+                AND (VP.END_DATE IS NULL OR VP.END_DATE >= p_Date)
+
+                AND VP.ACTIVE        =1
+
+                AND CUS.STATUS = 1
+
+                AND (gsnppId IS NULL OR VP.STAFF_ID = gsnppId OR  exists
+(SELECT NV.STAFF_ID FROM STAFF NV WHERE nv.staff_id = VP.STAFF_ID and
+NV.STAFF_OWNER_ID = gsnppId))
+
+                and (staffid is null or vp.staff_id = staffid)
+and(
+
+                    (                                
+
+                     exists (SELECT STAFF_ID FROM STAFF WHERE staff_id =
+VP.STAFF_ID and ROLE_TYPE IN (1,10) AND SHOP_ID IN (SELECT shop_id FROM
+p_shop)) --KA                 
+
+                    )
+
+                    or
+
+                    (
+
+                    exists (SELECT STAFF_ID FROM STAFF WHERE staff_id =
+VP.STAFF_ID and ROLE_TYPE IN (20) AND SHOP_ID IN (SELECT shop_id FROM
+p_shop))--KA                
+
+                    and mod((trunc(p_date,'iw') -
+trunc(vp.start_date,'iw')) / 7, decode(vp.week_sale, upper('MD'), 1,
+vp.week_sale)) = 0
+
+                    and (trunc(p_Date,'iw') - trunc(vp.start_date,'iw'))
+>= 0
+
+                    )
+
+                  )
+
+              GROUP BY VP.STAFF_ID
+
+              )
+
+--              select * from staff_visit;
+
+              
+
+              ,
+
+              ALL_CUSTOMER_VISITDAY AS -- CHI TIET GHE THAM THEO KE
+HOACH NGAY
+
+              (SELECT AL.* FROM ACTION_LOG AL
+
+                  WHERE (AL.OBJECT_TYPE     = 0 OR AL.OBJECT_TYPE     =
+1)
+
+                  AND (
+
+                    ( exists (SELECT STAFF_ID FROM STAFF WHERE staff_id
+= AL.STAFF_ID and role_type = 1 and SHOP_ID IN (SELECT shop_id FROM
+p_shop)) and al.is_or = 0)
+
+                    or
+
+                    ( exists (select staff_id from staff where staff_id
+= al.staff_id and role_type IN (10, 20) and shop_id IN (select shop_id
+from p_shop)) and al.is_or IN (0, 1))
+
+                  )
+
+                  AND (gsnppId IS NULL OR AL.STAFF_ID = gsnppId OR
+exists (SELECT NV.STAFF_ID FROM STAFF NV WHERE nv.staff_id = AL.STAFF_ID
+and NV.STAFF_OWNER_ID = gsnppId))
+
+                  AND (staffId IS NULL OR AL.STAFF_ID = staffId)
+
+                  AND AL.START_TIME >= TRUNC(p_Date)
+
+                  AND AL.START_TIME < TRUNC(p_Date) + 1
+
+                  /*AND STAFF_ID         IN
+
+                    (
+
+                        SELECT STAFF_ID FROM STAFF_VISIT
+
+                    )*/
+
+              ) ,
+
+              CUSTOMER_VISIT AS -- SO KHACH HANG DA GHE THAM
+
+              (
+
+                SELECT STAFF_ID, COUNT( DISTINCT CUSTOMER_ID) AS
+KHACHHANGTHUCGHETHAM
+
+                  FROM ALL_CUSTOMER_VISITDAY
+
+                  GROUP BY STAFF_ID
+
+              ) ,
+
+              CUSTOMER_INROUTING_VISIT AS -- SO KHACH HANG DA GHE THAM
+TRONG TUYEN
+
+              (SELECT STAFF_ID,
+
+                COUNT( DISTINCT CUSTOMER_ID) AS
+KHACHHANGTRONGTUYENGHETHAM
+
+              FROM ALL_CUSTOMER_VISITDAY
+
+              WHERE IS_OR = 0
+
+              GROUP BY STAFF_ID
+
+              ) ,
+
+              TOTAL_TIME_IN_DAY AS -- TONG THOI GIAN LAM VIEC CUA NHAN
+VIEN
+
+              (SELECT STAFF_ID,
+
+                ROUND(SUM((END_TIME-START_TIME)*24*60),2) AS
+TONGTHOIGIANLAMVIEC
+
+              FROM ALL_CUSTOMER_VISITDAY WHERE TRUNC(START_TIME) =
+TRUNC(END_TIME)
+
+              GROUP BY STAFF_ID
+
+              ) ,
+
+             START_TIME AS -- THOI GIAN BAT DAU
+
+              (SELECT STAFF_ID,
+
+                TO_CHAR(MIN(START_TIME),'HH24:MI:SS DD/MM/YYYY')
+THOIGIANBATDAU
+
+              FROM ALL_CUSTOMER_VISITDAY
+
+              GROUP BY STAFF_ID
+
+              ) ,
+
+              END_TIME AS -- THOI GIAN KET THUC
+
+              (SELECT STAFF_ID,
+
+                TO_CHAR(MAX(END_TIME),'HH24:MI:SS DD/MM/YYYY')
+THOIGIANKETTHUC
+
+              FROM ALL_CUSTOMER_VISITDAY
+
+              GROUP BY STAFF_ID
+
+              ) ,
+
+              SOLANGHETHAMDUOI5PHUT AS -- SO LAN GHE THAM DUOI 5 PHUT
+
+              (SELECT STAFF_ID,
+
+                COUNT(1) AS SOLANGHETHAMDUOI5PHUT
+
+              FROM ALL_CUSTOMER_VISITDAY
+
+              WHERE END_TIME IS NOT NULL AND
+ROUND((END_TIME-START_TIME)*24*60,2)  < 5
+
+             GROUP BY STAFF_ID
+
+              ) ,
+
+              SOLANGHETHAMDUOI30PHUT AS -- SO LAN GHE THAM DUOI 30 PHUT
+
+              (SELECT STAFF_ID,
+
+                COUNT(1) AS SOLANGHETHAMDUOI30PHUT
+
+              FROM ALL_CUSTOMER_VISITDAY
+
+              WHERE (ROUND((END_TIME-START_TIME)*24*60, 2) >= 5
+
+              AND ROUND((END_TIME  -START_TIME)*24*60, 2)  < 30) OR
+END_TIME IS NULL
+
+              GROUP BY STAFF_ID
+
+              ),
+
+              SOLANGHETHAMDUOI60PHUT AS -- SO LAN GHE THAM DUOI 60 PHUT
+
+              (SELECT STAFF_ID,
+
+                COUNT(1) AS SOLANGHETHAMDUOI60PHUT
+
+              FROM ALL_CUSTOMER_VISITDAY
+
+              WHERE ROUND((END_TIME-START_TIME)*24*60, 2) >= 30
+
+              AND ROUND((END_TIME-START_TIME)*24*60, 2)  <= 60
+
+              GROUP BY STAFF_ID
+
+              )
+
+              ,
+
+              SOLANGHETHAMTREN60PHUT AS -- SO LAN GHE THAM TREN 60 PHUT
+
+              (SELECT STAFF_ID,
+
+                COUNT(1) AS SOLANGHETHAMTREN60PHUT
+
+              FROM ALL_CUSTOMER_VISITDAY
+
+              WHERE ROUND((END_TIME-START_TIME)*24*60, 2) > 60
+
+              GROUP BY STAFF_ID
+
+              )
+
+            ,FRESULT AS (
+
+                SELECT RESULT.MAMIEN,
+
+                   RESULT.MAVUNG,
+
+                   RESULT.MANPP,
+
+                   RESULT.TENNPP,
+
+                   RESULT.TENGSNPP,
+
+                   RESULT.MANVBH,
+
+                   RESULT.TENNVBH,
+
+                   RESULT.TONGSOKHACHHANG,
+
+                   RESULT.SOKHACHHANGTHUCGHE,
+
+                   RESULT.KHACHHANGTRONGTUYENKOGHETHAM,
+
+                   RESULT.TONGTHOIGIANLAMVIEC,
+
+                   RESULT.THOIGIANBATDAU,
+
+                   RESULT.THOIGIANKETTHUC,
+
+                   RESULT.SOLANGHETHAMDUOI5PHUT,
+
+                   RESULT.SOLANGHETHAMDUOI30PHUT,
+
+                   RESULT.SOLANGHETHAMDUOI60PHUT,
+
+                   RESULT.SOLANGHETHAMTREN60PHUT,
+
+                   CASE
+
+                    WHEN RESULT.SOKHACHHANGTHUCGHE > 0
+
+                    THEN
+ROUND(RESULT.TONGTHOIGIANLAMVIEC/RESULT.SOKHACHHANGTHUCGHE,2)
+
+                    ELSE NULL
+
+                  END AS TBTHOIGIANGHETHAMKHACHHANG
+
+                FROM
+
+                  (SELECT
+
+                    --STAFF_VISIT.STAFF_ID STAFF_ID,
+
+                    CASE when MIEN.SHOP_CODE is null then VUNG.SHOP_CODE
+else MIEN.SHOP_CODE end AS MAMIEN ,
+
+                    CASE when VUNG.SHOP_CODE is null then NPP.SHOP_CODE
+else VUNG.SHOP_CODE end AS MAVUNG ,
+
+                    NPP.SHOP_CODE  AS MANPP,
+
+                    NPP.SHOP_NAME  AS TENNPP,
+
+                    (
+
+                        SELECT GSNPP.NAME
+
+                        FROM STAFF GSNPP
+
+                        where (staff.staff_owner_id = gsnpp.staff_id and
+staff.role_type = 1)
+
+                        OR (STAFF.STAFF_ID = GSNPP.STAFF_ID AND
+STAFF.ROLE_TYPE = 10) OR (STAFF.STAFF_ID = GSNPP.STAFF_ID AND
+STAFF.ROLE_TYPE = 20)
+
+                    )                                  AS TENGSNPP,
+
+                    STAFF.STAFF_CODE                   AS MANVBH ,
+
+                    STAFF.NAME                         AS TENNVBH ,
+
+                    STAFF_VISIT.KHACHHANGDUKIENGHETHAM AS
+TONGSOKHACHHANG ,
+
+                    (
+
+                        SELECT v.KHACHHANGTHUCGHETHAM
+
+                        FROM CUSTOMER_VISIT v
+
+                        WHERE STAFF_VISIT.STAFF_ID = v.STAFF_ID
+
+                    ) AS SOKHACHHANGTHUCGHE,
+
+                    (
+
+                        STAFF_VISIT.KHACHHANGDUKIENGHETHAM -
+
+                        NVL((SELECT v.KHACHHANGTRONGTUYENGHETHAM
+
+                        FROM CUSTOMER_INROUTING_VISIT v
+
+                        WHERE STAFF_VISIT.STAFF_ID = v.STAFF_ID
+
+                        ),0)
+
+                    ) AS KHACHHANGTRONGTUYENKOGHETHAM,
+
+                    (SELECT t.TONGTHOIGIANLAMVIEC
+
+                    FROM TOTAL_TIME_IN_DAY t
+
+                    WHERE STAFF_VISIT.STAFF_ID = t.STAFF_ID
+
+                    ) AS TONGTHOIGIANLAMVIEC,
+
+                    (SELECT t.THOIGIANBATDAU
+
+                    FROM START_TIME t
+
+                    WHERE STAFF_VISIT.STAFF_ID = t.STAFF_ID
+
+                    ) AS THOIGIANBATDAU,
+
+                    (SELECT t.THOIGIANKETTHUC
+
+                    FROM END_TIME t
+
+                    WHERE STAFF_VISIT.STAFF_ID = t.STAFF_ID
+
+                    ) AS THOIGIANKETTHUC,
+
+                    (SELECT t.SOLANGHETHAMDUOI5PHUT
+
+                    FROM SOLANGHETHAMDUOI5PHUT t
+
+                    WHERE STAFF_VISIT.STAFF_ID = t.STAFF_ID
+
+                    ) AS SOLANGHETHAMDUOI5PHUT,
+
+                    (SELECT t.SOLANGHETHAMDUOI30PHUT
+
+                    FROM SOLANGHETHAMDUOI30PHUT t
+
+                    WHERE STAFF_VISIT.STAFF_ID = t.STAFF_ID
+
+                    ) AS SOLANGHETHAMDUOI30PHUT,
+
+                    (SELECT t.SOLANGHETHAMDUOI60PHUT
+
+                    FROM SOLANGHETHAMDUOI60PHUT t
+
+                    WHERE STAFF_VISIT.STAFF_ID = t.STAFF_ID
+
+                    ) AS SOLANGHETHAMDUOI60PHUT,
+
+                    (SELECT t.SOLANGHETHAMTREN60PHUT
+
+                    FROM SOLANGHETHAMTREN60PHUT t
+
+                    WHERE STAFF_VISIT.STAFF_ID = t.STAFF_ID
+
+                    ) AS SOLANGHETHAMTREN60PHUT
+
+                  FROM STAFF_VISIT
+
+                  INNER JOIN STAFF
+
+                  ON (STAFF_VISIT.STAFF_ID = STAFF.STAFF_ID AND
+(STAFF.STATUS = 1 OR (STAFF.STATUS = 0 AND p_Date <
+TRUNC(STAFF.update_time)))
+
+                  )
+
+                  INNER JOIN SHOP NPP
+
+                  ON (STAFF.SHOP_ID = NPP.SHOP_ID)
+
+                  LEFT JOIN SHOP VUNG
+
+                  ON (NPP.PARENT_SHOP_ID = VUNG.SHOP_ID)
+
+                  LEFT JOIN SHOP MIEN
+
+                  ON (VUNG.PARENT_SHOP_ID = MIEN.SHOP_ID)
+
+                  ) RESULT
+
+                   WHERE
+
+                    RESULT.TONGSOKHACHHANG = 0
+
+                    AND (RESULT.TONGTHOIGIANLAMVIEC IS NOT NULL
+
+                    OR RESULT.THOIGIANBATDAU IS NOT NULL
+
+                    OR RESULT.THOIGIANKETTHUC IS NOT NULL
+
+                    OR RESULT.SOLANGHETHAMDUOI5PHUT IS NOT NULL
+
+                    OR RESULT.SOLANGHETHAMDUOI30PHUT IS NOT NULL
+
+                    OR RESULT.SOLANGHETHAMDUOI60PHUT IS NOT NULL
+
+                    OR RESULT.SOLANGHETHAMTREN60PHUT IS NOT NULL)
+
+                    OR RESULT.TONGSOKHACHHANG <> 0
+
+                  ORDER BY RESULT.MAMIEN, RESULT.MAVUNG, RESULT.MANPP,
+RESULT.TENGSNPP, RESULT.MANVBH
+
+                )
+
+                , SRESULT AS (
+
+                    SELECT FRESULT.MAMIEN,
+
+                   FRESULT.MAVUNG,
+
+                   FRESULT.MANPP,
+
+                   FRESULT.TENNPP,
+
+                   FRESULT.TENGSNPP,
+
+                   FRESULT.MANVBH,
+
+                   FRESULT.TENNVBH,
+
+                   SUM(NVL(FRESULT.TONGSOKHACHHANG,0)) TONGSOKHACHHANG,
+
+                   SUM(NVL(FRESULT.SOKHACHHANGTHUCGHE,0))
+SOKHACHHANGTHUCGHE,
+
+                   SUM(NVL(FRESULT.KHACHHANGTRONGTUYENKOGHETHAM,0))
+KHACHHANGTRONGTUYENKOGHETHAM,
+
+                   SUM(NVL(FRESULT.TONGTHOIGIANLAMVIEC,0))
+TONGTHOIGIANLAMVIEC,
+
+                   NULL THOIGIANBATDAU,
+
+                   NULL THOIGIANKETTHUC,
+
+                   SUM(NVL(FRESULT.SOLANGHETHAMDUOI5PHUT,0))
+SOLANGHETHAMDUOI5PHUT,
+
+                   SUM(NVL(FRESULT.SOLANGHETHAMDUOI30PHUT,0))
+SOLANGHETHAMDUOI30PHUT,
+
+                   SUM(NVL(FRESULT.SOLANGHETHAMDUOI60PHUT,0))
+SOLANGHETHAMDUOI60PHUT,
+
+                   SUM(NVL(FRESULT.SOLANGHETHAMTREN60PHUT,0))
+SOLANGHETHAMTREN60PHUT,
+
+                   --SUM(NVL(FRESULT.TBTHOIGIANGHETHAMKHACHHANG,0))
+TBTHOIGIANGHETHAMKHACHHANG
+
+                   ROUND(AVG(FRESULT.TBTHOIGIANGHETHAMKHACHHANG),2)
+TBTHOIGIANGHETHAMKHACHHANG
+
+                   FROM FRESULT
+
+                   GROUP BY ROLLUP(FRESULT.MAMIEN, FRESULT.MAVUNG,
+(FRESULT.MANPP, FRESULT.TENNPP), FRESULT.TENGSNPP, (FRESULT.MANVBH,
+FRESULT.TENNVBH)))
+
+                , FFRESULT AS(
+
+                                SELECT
+
+                                    FRESULT.* FROM FRESULT UNION SELECT
+SRESULT.* FROM SRESULT
+
+                               WHERE  SRESULT.MANVBH IS NULL AND
+SRESULT.TENNVBH IS NULL
+
+                             )
+
+                SELECT
+
+                   CASE WHEN FFRESULT.MAMIEN IS NULL THEN cast('Tổng' as
+nvarchar2(10)) ELSE FFRESULT.MAMIEN END MAMIEN,
+
+                   FFRESULT.MAVUNG,
+
+                   FFRESULT.MANPP,
+
+                   FFRESULT.TENNPP,
+
+                   FFRESULT.TENGSNPP,
+
+                   FFRESULT.MANVBH,
+
+                   FFRESULT.TENNVBH,
+
+                   CASE
+
+                    WHEN FFRESULT.TONGSOKHACHHANG = 0 THEN NULL ELSE
+FFRESULT.TONGSOKHACHHANG END TONGSOKHACHHANG,
+
+                   CASE
+
+                    WHEN FFRESULT.SOKHACHHANGTHUCGHE = 0 THEN NULL ELSE
+FFRESULT.SOKHACHHANGTHUCGHE END SOKHACHHANGTHUCGHE,
+
+                   CASE
+
+                    WHEN FFRESULT.KHACHHANGTRONGTUYENKOGHETHAM <= 0 THEN
+NULL ELSE FFRESULT.KHACHHANGTRONGTUYENKOGHETHAM END
+KHACHHANGTRONGTUYENKOGHETHAM,
+
+                   CASE
+
+                    WHEN FFRESULT.TONGTHOIGIANLAMVIEC = 0 THEN NULL ELSE
+ROUND(FFRESULT.TONGTHOIGIANLAMVIEC,2) END TONGTHOIGIANLAMVIEC,
+
+                   CASE
+
+                    WHEN FFRESULT.THOIGIANBATDAU = '0' THEN NULL ELSE
+FFRESULT.THOIGIANBATDAU END THOIGIANBATDAU,
+
+                   CASE
+
+                    WHEN FFRESULT.THOIGIANKETTHUC = '0' THEN NULL ELSE
+FFRESULT.THOIGIANKETTHUC END THOIGIANKETTHUC,
+
+                   CASE
+
+                    WHEN FFRESULT.SOLANGHETHAMDUOI5PHUT = 0 THEN NULL
+ELSE FFRESULT.SOLANGHETHAMDUOI5PHUT END SOLANGHETHAMDUOI5PHUT,
+
+                   CASE
+
+                    WHEN FFRESULT.SOLANGHETHAMDUOI30PHUT = 0 THEN NULL
+ELSE FFRESULT.SOLANGHETHAMDUOI30PHUT END SOLANGHETHAMDUOI30PHUT,
+
+                   CASE
+
+                    WHEN FFRESULT.SOLANGHETHAMDUOI60PHUT = 0 THEN NULL
+ELSE FFRESULT.SOLANGHETHAMDUOI60PHUT END SOLANGHETHAMDUOI60PHUT,
+
+                   CASE
+
+                    WHEN FFRESULT.SOLANGHETHAMTREN60PHUT = 0 THEN NULL
+ELSE FFRESULT.SOLANGHETHAMTREN60PHUT END SOLANGHETHAMTREN60PHUT,
+
+                   CASE
+
+                    WHEN FFRESULT.SOKHACHHANGTHUCGHE = 0 THEN NULL ELSE
+FFRESULT.TBTHOIGIANGHETHAMKHACHHANG END TBTHOIGIANGHETHAMKHACHHANG
+
+                FROM FFRESULT ORDER BY FFRESULT.MAMIEN, FFRESULT.MAVUNG,
+FFRESULT.MANPP, FFRESULT.TENGSNPP, FFRESULT.MANVBH
+
+                ;
+
+    else
+
+      OPEN res FOR
+
+          WITH
+
+          p_shop AS
+
+          (
+
+          SELECT shop_id
+
+          FROM shop
+
+            CONNECT BY PRIOR shop_id = parent_shop_id
+
+            START WITH shop_id      IN
+
+            (SELECT shop_id
+
+            FROM shop
+
+            WHERE shop_id IN
+
+              (SELECT regexp_substr(lstShopId,'[^,]+', 1, level)
+
+              FROM dual
+
+                CONNECT BY regexp_substr(lstShopId, '[^,]+', 1, level)
+IS NOT NULL
+
+              )
+
+            )
+
+          GROUP BY shop_id
+
+          ),
+
+          STAFF_VISIT AS --- KHACH HANG GHE THAM THEO KE HOACH NGAY
+
+              (SELECT VP.STAFF_ID,
+
+                CASE
+
+                  WHEN TRIM(TO_CHAR(p_Date,'DAY')) = 'MONDAY'
+
+                  THEN SUM(MONDAY)
+
+                  WHEN TRIM(TO_CHAR(p_Date,'DAY')) = 'TUESDAY'
+
+                  THEN SUM(TUESDAY)
+
+                  WHEN TRIM(TO_CHAR(p_Date,'DAY')) = 'WEDNESDAY'
+
+                  THEN SUM(WEDNESDAY)
+
+                  WHEN TRIM(TO_CHAR(p_Date,'DAY')) = 'THURSDAY'
+
+                  THEN SUM(THURSDAY)
+
+                  WHEN TRIM(TO_CHAR(p_Date,'DAY')) = 'FRIDAY'
+
+                  THEN SUM(FRIDAY)
+
+                  WHEN TRIM(TO_CHAR(p_Date,'DAY')) = 'SATURDAY'
+
+                  THEN SUM(SATURDAY)
+
+                  ELSE SUM(SUNDAY)
+
+                END AS KHACHHANGDUKIENGHETHAM
+
+              FROM  VISIT_PLAN_LOG VP JOIN CUSTOMER CUS ON
+VP.CUSTOMER_ID = CUS.CUSTOMER_ID
+
+              JOIN STAFF S ON S.STAFF_ID = VP.STAFF_ID
+
+              JOIN SHOP SH ON SH.SHOP_ID = S.SHOP_ID
+
+              where
+
+                VP.FROMDATE_LOG <= p_Date
+
+                AND (VP.TODATE_LOG IS NULL OR VP.TODATE_LOG >= p_Date)
+
+--                AND VP.ACTIVE        =1
+
+                AND CUS.STATUS = 1
+
+                and (staffid is null or vp.staff_id = staffid)
+
+                and (gsnppid is null or vp.staff_id = gsnppid or  exists
+(select nv.staff_id from staff nv where nv.staff_id = vp.staff_id and
+nv.staff_owner_id = gsnppid))
+
+                and(
+
+                    (                               
+
+                    exists  (SELECT STAFF_ID FROM STAFF WHERE staff_id =
+VP.STAFF_ID and ROLE_TYPE IN (1,10) AND SHOP_ID IN (SELECT shop_id FROM
+p_shop))
+
+                    )
+
+                    or
+
+                    (                
+
+                    exists  (SELECT STAFF_ID FROM STAFF WHERE staff_id =
+VP.STAFF_ID and ROLE_TYPE IN (20) AND SHOP_ID IN (SELECT shop_id FROM
+p_shop))
+
+                    and mod((trunc(p_date,'iw') -
+trunc(vp.start_date,'iw')) / 7, decode(vp.week_sale, upper('MD'), 1,
+vp.week_sale)) = 0
+
+                    and (trunc(p_Date,'iw') - trunc(vp.start_date,'iw'))
+>= 0
+
+                    )
+
+                  )
+
+              GROUP BY VP.STAFF_ID
+
+              ),
+
+              ALL_CUSTOMER_VISITDAY AS -- CHI TIET GHE THAM THEO KE
+HOACH NGAY
+
+              (SELECT AL.* FROM ACTION_LOG AL
+
+                  WHERE (AL.OBJECT_TYPE     = 0 OR AL.OBJECT_TYPE     =
+1)
+
+                  AND (
+
+                    (exists (SELECT STAFF_ID FROM STAFF WHERE staff_id =
+AL.STAFF_ID and role_type = 1 and SHOP_ID IN (SELECT shop_id FROM
+p_shop)) and al.is_or = 0)
+
+                    or
+
+                    ( exists (select staff_id from staff where staff_id
+= al.staff_id and role_type IN (10, 20) and shop_id IN (select shop_id
+from p_shop)) and al.is_or IN (0, 1))
+
+                  )
+
+                  AND (gsnppId IS NULL OR AL.STAFF_ID = gsnppId OR
+exists (SELECT NV.STAFF_ID FROM STAFF NV WHERE nv.staff_id = AL.STAFF_ID
+and NV.STAFF_OWNER_ID = gsnppId))
+
+                  AND (staffId IS NULL OR AL.STAFF_ID = staffId)
+
+                  AND AL.START_TIME >= TRUNC(p_Date)
+
+                  AND AL.START_TIME < TRUNC(p_Date) + 1
+
+                  /*AND STAFF_ID         IN
+
+                    (
+
+                        SELECT STAFF_ID FROM STAFF_VISIT
+
+                    )*/
+
+              ) ,
+
+              CUSTOMER_VISIT AS -- SO KHACH HANG DA GHE THAM
+
+              (
+
+                SELECT STAFF_ID, COUNT( DISTINCT CUSTOMER_ID) AS
+KHACHHANGTHUCGHETHAM
+
+                  FROM ALL_CUSTOMER_VISITDAY
+
+                  GROUP BY STAFF_ID
+
+              ) ,
+
+              CUSTOMER_INROUTING_VISIT AS -- SO KHACH HANG DA GHE THAM
+TRONG TUYEN
+
+              (SELECT STAFF_ID,
+
+                COUNT( DISTINCT CUSTOMER_ID) AS
+KHACHHANGTRONGTUYENGHETHAM
+
+              FROM ALL_CUSTOMER_VISITDAY
+
+              WHERE IS_OR = 0
+
+              GROUP BY STAFF_ID
+
+              ) ,
+
+              TOTAL_TIME_IN_DAY AS -- TONG THOI GIAN LAM VIEC CUA NHAN
+VIEN
+
+              (SELECT STAFF_ID,
+
+                ROUND(SUM((END_TIME-START_TIME)*24*60),2) AS
+TONGTHOIGIANLAMVIEC
+
+              FROM ALL_CUSTOMER_VISITDAY WHERE TRUNC(START_TIME) =
+TRUNC(END_TIME)
+
+              GROUP BY STAFF_ID
+
+              ) ,
+
+             START_TIME AS -- THOI GIAN BAT DAU
+
+              (SELECT STAFF_ID,
+
+                TO_CHAR(MIN(START_TIME),'HH24:MI:SS DD/MM/YYYY')
+THOIGIANBATDAU
+
+              FROM ALL_CUSTOMER_VISITDAY
+
+              GROUP BY STAFF_ID
+
+              ) ,
+
+              END_TIME AS -- THOI GIAN KET THUC
+
+              (SELECT STAFF_ID,
+
+                TO_CHAR(MAX(END_TIME),'HH24:MI:SS DD/MM/YYYY')
+THOIGIANKETTHUC
+
+              FROM ALL_CUSTOMER_VISITDAY
+
+              GROUP BY STAFF_ID
+
+              ) ,
+
+              SOLANGHETHAMDUOI5PHUT AS -- SO LAN GHE THAM DUOI 5 PHUT
+
+              (SELECT STAFF_ID,
+
+                COUNT(1) AS SOLANGHETHAMDUOI5PHUT
+
+              FROM ALL_CUSTOMER_VISITDAY
+
+              WHERE END_TIME IS NOT NULL AND
+ROUND((END_TIME-START_TIME)*24*60,2)  < 5
+
+             GROUP BY STAFF_ID
+
+              ) ,
+
+              SOLANGHETHAMDUOI30PHUT AS -- SO LAN GHE THAM DUOI 30 PHUT
+
+              (SELECT STAFF_ID,
+
+                COUNT(1) AS SOLANGHETHAMDUOI30PHUT
+
+              FROM ALL_CUSTOMER_VISITDAY
+
+              WHERE (ROUND((END_TIME-START_TIME)*24*60, 2) >= 5
+
+              AND ROUND((END_TIME  -START_TIME)*24*60, 2)  < 30) OR
+END_TIME IS NULL
+
+              GROUP BY STAFF_ID
+
+              ),
+
+              SOLANGHETHAMDUOI60PHUT AS -- SO LAN GHE THAM DUOI 60 PHUT
+
+              (SELECT STAFF_ID,
+
+                COUNT(1) AS SOLANGHETHAMDUOI60PHUT
+
+              FROM ALL_CUSTOMER_VISITDAY
+
+              WHERE ROUND((END_TIME-START_TIME)*24*60, 2) >= 30
+
+              AND ROUND((END_TIME-START_TIME)*24*60, 2)  <= 60
+
+              GROUP BY STAFF_ID
+
+              )
+
+              ,
+
+              SOLANGHETHAMTREN60PHUT AS -- SO LAN GHE THAM TREN 60 PHUT
+
+              (SELECT STAFF_ID,
+
+                COUNT(1) AS SOLANGHETHAMTREN60PHUT
+
+              FROM ALL_CUSTOMER_VISITDAY
+
+              WHERE ROUND((END_TIME-START_TIME)*24*60, 2) > 60
+
+              GROUP BY STAFF_ID
+
+              )
+
+            ,FRESULT AS (
+
+                SELECT RESULT.MAMIEN,
+
+                   RESULT.MAVUNG,
+
+                   RESULT.MANPP,
+
+                   RESULT.TENNPP,
+
+                   RESULT.TENGSNPP,
+
+                   RESULT.MANVBH,
+
+                   RESULT.TENNVBH,
+
+                   RESULT.TONGSOKHACHHANG,
+
+                   RESULT.SOKHACHHANGTHUCGHE,
+
+                   RESULT.KHACHHANGTRONGTUYENKOGHETHAM,
+
+                   RESULT.TONGTHOIGIANLAMVIEC,
+
+                   RESULT.THOIGIANBATDAU,
+
+                   RESULT.THOIGIANKETTHUC,
+
+                   RESULT.SOLANGHETHAMDUOI5PHUT,
+
+                   RESULT.SOLANGHETHAMDUOI30PHUT,
+
+                   RESULT.SOLANGHETHAMDUOI60PHUT,
+
+                   RESULT.SOLANGHETHAMTREN60PHUT,
+
+                   CASE
+
+                    WHEN RESULT.SOKHACHHANGTHUCGHE > 0
+
+                    THEN
+ROUND(RESULT.TONGTHOIGIANLAMVIEC/RESULT.SOKHACHHANGTHUCGHE,2)
+
+                    ELSE NULL
+
+                  END AS TBTHOIGIANGHETHAMKHACHHANG
+
+                FROM
+
+                  (SELECT
+
+                    --STAFF_VISIT.STAFF_ID STAFF_ID,
+
+                    CASE when MIEN.SHOP_CODE is null then VUNG.SHOP_CODE
+else MIEN.SHOP_CODE end AS MAMIEN ,
+
+                    CASE when VUNG.SHOP_CODE is null then NPP.SHOP_CODE
+else VUNG.SHOP_CODE end AS MAVUNG ,
+
+                    NPP.SHOP_CODE  AS MANPP,
+
+                    NPP.SHOP_NAME  AS TENNPP,
+
+                    (
+
+                        SELECT GSNPP.NAME
+
+                        FROM STAFF GSNPP
+
+                        WHERE (STAFF.STAFF_OWNER_ID = GSNPP.STAFF_ID AND
+STAFF.ROLE_TYPE = 1)
+
+                        OR (STAFF.STAFF_ID = GSNPP.STAFF_ID AND
+STAFF.ROLE_TYPE = 10) OR (STAFF.STAFF_ID = GSNPP.STAFF_ID AND
+STAFF.ROLE_TYPE = 20)
+
+                    )                                  AS TENGSNPP,
+
+                    STAFF.STAFF_CODE                   AS MANVBH ,
+
+                    STAFF.NAME                         AS TENNVBH ,
+
+                    STAFF_VISIT.KHACHHANGDUKIENGHETHAM AS
+TONGSOKHACHHANG ,
+
+                    (
+
+                        SELECT v.KHACHHANGTHUCGHETHAM
+
+                        FROM CUSTOMER_VISIT v
+
+                        WHERE STAFF_VISIT.STAFF_ID = v.STAFF_ID
+
+                    ) AS SOKHACHHANGTHUCGHE,
+
+                    (
+
+                        STAFF_VISIT.KHACHHANGDUKIENGHETHAM -
+
+                        NVL((SELECT v.KHACHHANGTRONGTUYENGHETHAM
+
+                        FROM CUSTOMER_INROUTING_VISIT v
+
+                        WHERE STAFF_VISIT.STAFF_ID = v.STAFF_ID
+
+                        ),0)
+
+                    ) AS KHACHHANGTRONGTUYENKOGHETHAM,
+
+                    (SELECT t.TONGTHOIGIANLAMVIEC
+
+                    FROM TOTAL_TIME_IN_DAY t
+
+                    WHERE STAFF_VISIT.STAFF_ID = t.STAFF_ID
+
+                    ) AS TONGTHOIGIANLAMVIEC,
+
+                    (SELECT t.THOIGIANBATDAU
+
+                    FROM START_TIME t
+
+                    WHERE STAFF_VISIT.STAFF_ID = t.STAFF_ID
+
+                    ) AS THOIGIANBATDAU,
+
+                    (SELECT t.THOIGIANKETTHUC
+
+                    FROM END_TIME t
+
+                    WHERE STAFF_VISIT.STAFF_ID = t.STAFF_ID
+
+                    ) AS THOIGIANKETTHUC,
+
+                    (SELECT t.SOLANGHETHAMDUOI5PHUT
+
+                    FROM SOLANGHETHAMDUOI5PHUT t
+
+                    WHERE STAFF_VISIT.STAFF_ID = t.STAFF_ID
+
+                    ) AS SOLANGHETHAMDUOI5PHUT,
+
+                    (SELECT t.SOLANGHETHAMDUOI30PHUT
+
+                    FROM SOLANGHETHAMDUOI30PHUT t
+
+                    WHERE STAFF_VISIT.STAFF_ID = t.STAFF_ID
+
+                    ) AS SOLANGHETHAMDUOI30PHUT,
+
+                    (SELECT t.SOLANGHETHAMDUOI60PHUT
+
+                    FROM SOLANGHETHAMDUOI60PHUT t
+
+                    WHERE STAFF_VISIT.STAFF_ID = t.STAFF_ID
+
+                    ) AS SOLANGHETHAMDUOI60PHUT,
+
+                    (SELECT t.SOLANGHETHAMTREN60PHUT
+
+                    FROM SOLANGHETHAMTREN60PHUT t
+
+                    WHERE STAFF_VISIT.STAFF_ID = t.STAFF_ID
+
+                    ) AS SOLANGHETHAMTREN60PHUT
+
+                  FROM STAFF_VISIT
+
+                  INNER JOIN STAFF
+
+                  ON (STAFF_VISIT.STAFF_ID = STAFF.STAFF_ID AND
+(STAFF.STATUS = 1 OR (STAFF.STATUS = 0 AND p_Date <
+TRUNC(STAFF.update_time)))
+
+                  )
+
+                  INNER JOIN SHOP NPP
+
+                  ON (STAFF.SHOP_ID = NPP.SHOP_ID)
+
+                  LEFT JOIN SHOP VUNG
+
+                  ON (NPP.PARENT_SHOP_ID = VUNG.SHOP_ID)
+
+                  LEFT JOIN SHOP MIEN
+
+                  ON (VUNG.PARENT_SHOP_ID = MIEN.SHOP_ID)
+
+                  ) RESULT
+
+                   WHERE
+
+                    RESULT.TONGSOKHACHHANG = 0
+
+                    AND (RESULT.TONGTHOIGIANLAMVIEC IS NOT NULL
+
+                    OR RESULT.THOIGIANBATDAU IS NOT NULL
+
+                    OR RESULT.THOIGIANKETTHUC IS NOT NULL
+
+                    OR RESULT.SOLANGHETHAMDUOI5PHUT IS NOT NULL
+
+                    OR RESULT.SOLANGHETHAMDUOI30PHUT IS NOT NULL
+
+                    OR RESULT.SOLANGHETHAMDUOI60PHUT IS NOT NULL
+
+                    OR RESULT.SOLANGHETHAMTREN60PHUT IS NOT NULL)
+
+                    OR RESULT.TONGSOKHACHHANG <> 0
+
+                  ORDER BY RESULT.MAMIEN, RESULT.MAVUNG, RESULT.MANPP,
+RESULT.TENGSNPP, RESULT.MANVBH
+
+                )
+
+                , SRESULT AS (
+
+                    SELECT FRESULT.MAMIEN,
+
+                   FRESULT.MAVUNG,
+
+                   FRESULT.MANPP,
+
+                   FRESULT.TENNPP,
+
+                   FRESULT.TENGSNPP,
+
+                   FRESULT.MANVBH,
+
+                   FRESULT.TENNVBH,
+
+                   SUM(NVL(FRESULT.TONGSOKHACHHANG,0)) TONGSOKHACHHANG,
+
+                   SUM(NVL(FRESULT.SOKHACHHANGTHUCGHE,0))
+SOKHACHHANGTHUCGHE,
+
+                   SUM(NVL(FRESULT.KHACHHANGTRONGTUYENKOGHETHAM,0))
+KHACHHANGTRONGTUYENKOGHETHAM,
+
+                   SUM(NVL(FRESULT.TONGTHOIGIANLAMVIEC,0))
+TONGTHOIGIANLAMVIEC,
+
+                   NULL THOIGIANBATDAU,
+
+                   NULL THOIGIANKETTHUC,
+
+                   SUM(NVL(FRESULT.SOLANGHETHAMDUOI5PHUT,0))
+SOLANGHETHAMDUOI5PHUT,
+
+                   SUM(NVL(FRESULT.SOLANGHETHAMDUOI30PHUT,0))
+SOLANGHETHAMDUOI30PHUT,
+
+                   SUM(NVL(FRESULT.SOLANGHETHAMDUOI60PHUT,0))
+SOLANGHETHAMDUOI60PHUT,
+
+                   SUM(NVL(FRESULT.SOLANGHETHAMTREN60PHUT,0))
+SOLANGHETHAMTREN60PHUT,
+
+                   --SUM(NVL(FRESULT.TBTHOIGIANGHETHAMKHACHHANG,0))
+TBTHOIGIANGHETHAMKHACHHANG
+
+                   ROUND(AVG(FRESULT.TBTHOIGIANGHETHAMKHACHHANG),2)
+TBTHOIGIANGHETHAMKHACHHANG
+
+                   FROM FRESULT
+
+                   GROUP BY ROLLUP(FRESULT.MAMIEN, FRESULT.MAVUNG,
+(FRESULT.MANPP, FRESULT.TENNPP), FRESULT.TENGSNPP, (FRESULT.MANVBH,
+FRESULT.TENNVBH)))
+
+                , FFRESULT AS(
+
+                                SELECT
+
+                                    FRESULT.* FROM FRESULT UNION SELECT
+SRESULT.* FROM SRESULT
+
+                               WHERE  SRESULT.MANVBH IS NULL AND
+SRESULT.TENNVBH IS NULL
+
+                             )
+
+                SELECT
+
+                   CASE WHEN FFRESULT.MAMIEN IS NULL THEN cast('Tổng' as
+nvarchar2(10)) ELSE FFRESULT.MAMIEN END MAMIEN,
+
+                   FFRESULT.MAVUNG,
+
+                   FFRESULT.MANPP,
+
+                   FFRESULT.TENNPP,
+
+                   FFRESULT.TENGSNPP,
+
+                   FFRESULT.MANVBH,
+
+                   FFRESULT.TENNVBH,
+
+                   CASE
+
+                    WHEN FFRESULT.TONGSOKHACHHANG = 0 THEN NULL ELSE
+FFRESULT.TONGSOKHACHHANG END TONGSOKHACHHANG,
+
+                   CASE
+
+                    WHEN FFRESULT.SOKHACHHANGTHUCGHE = 0 THEN NULL ELSE
+FFRESULT.SOKHACHHANGTHUCGHE END SOKHACHHANGTHUCGHE,
+
+                   CASE
+
+                    WHEN FFRESULT.KHACHHANGTRONGTUYENKOGHETHAM <= 0 THEN
+NULL ELSE FFRESULT.KHACHHANGTRONGTUYENKOGHETHAM END
+KHACHHANGTRONGTUYENKOGHETHAM,
+
+                   CASE
+
+                    WHEN FFRESULT.TONGTHOIGIANLAMVIEC = 0 THEN NULL ELSE
+ROUND(FFRESULT.TONGTHOIGIANLAMVIEC,2) END TONGTHOIGIANLAMVIEC,
+
+                   CASE
+
+                    WHEN FFRESULT.THOIGIANBATDAU = '0' THEN NULL ELSE
+FFRESULT.THOIGIANBATDAU END THOIGIANBATDAU,
+
+                   CASE
+
+                    WHEN FFRESULT.THOIGIANKETTHUC = '0' THEN NULL ELSE
+FFRESULT.THOIGIANKETTHUC END THOIGIANKETTHUC,
+
+                   CASE
+
+                    WHEN FFRESULT.SOLANGHETHAMDUOI5PHUT = 0 THEN NULL
+ELSE FFRESULT.SOLANGHETHAMDUOI5PHUT END SOLANGHETHAMDUOI5PHUT,
+
+                   CASE
+
+                    WHEN FFRESULT.SOLANGHETHAMDUOI30PHUT = 0 THEN NULL
+ELSE FFRESULT.SOLANGHETHAMDUOI30PHUT END SOLANGHETHAMDUOI30PHUT,
+
+                   CASE
+
+                    WHEN FFRESULT.SOLANGHETHAMDUOI60PHUT = 0 THEN NULL
+ELSE FFRESULT.SOLANGHETHAMDUOI60PHUT END SOLANGHETHAMDUOI60PHUT,
+
+                   CASE
+
+                    WHEN FFRESULT.SOLANGHETHAMTREN60PHUT = 0 THEN NULL
+ELSE FFRESULT.SOLANGHETHAMTREN60PHUT END SOLANGHETHAMTREN60PHUT,
+
+                   CASE
+
+                    WHEN FFRESULT.SOKHACHHANGTHUCGHE = 0 THEN NULL ELSE
+FFRESULT.TBTHOIGIANGHETHAMKHACHHANG END TBTHOIGIANGHETHAMKHACHHANG
+
+                FROM FFRESULT ORDER BY FFRESULT.MAMIEN, FFRESULT.MAVUNG,
+FFRESULT.MANPP, FFRESULT.TENGSNPP, FFRESULT.MANVBH
+
+                ;
+
+    end if;
+
+  END PROC_VT1;
+
+ 
+
+    PROCEDURE PROC_VT2(res OUT SYS_REFCURSOR , lstShopId NVARCHAR2,
+gsnppId NUMBER, staffId NUMBER, fromDateStr STRING, toDateStr STRING,
+n_minutes NUMBER) AS
+
+  fromDate date;
+
+  toDate date;
+
+  BEGIN
+
+    fromDate := to_date(fromDateStr, 'dd/mm/yyyy');
+
+    toDate := to_date(toDateStr, 'dd/mm/yyyy');
+
+    OPEN res FOR
+
+                    WITH
+
+              p_shop AS
+
+              (
+
+               SELECT shop_id
+
+               FROM shop
+
+               CONNECT BY PRIOR shop_id = parent_shop_id
+
+               START WITH shop_id IN
+
+                                      (
+
+                                      SELECT shop_id
+
+                                      FROM shop
+
+                                      WHERE shop_id IN
+
+                                        (SELECT
+regexp_substr(lstShopId,'[^,]+', 1, level)
+
+                                        FROM dual
+
+                                          CONNECT BY
+regexp_substr(lstShopId, '[^,]+', 1, level) IS NOT NULL
+
+                                        )
+
+                                      )
+
+              GROUP BY shop_id
+
+              )
+
+              
+
+              ,RTIME AS (SELECT
+
+                (SELECT VALUE S_FROM_TIME FROM AP_PARAM WHERE CODE =
+'S_FROM_TIME') S_FROM_TIME
+
+                ,(SELECT VALUE FROM AP_PARAM WHERE CODE = 'S_TO_TIME')
+S_TO_TIME
+
+                ,(SELECT VALUE FROM AP_PARAM WHERE CODE = 'C_FROM_TIME')
+C_FROM_TIME
+
+                ,(SELECT VALUE FROM AP_PARAM WHERE CODE ='C_TO_TIME')
+C_TO_TIME FROM DUAL
+
+              )
+
+              
+
+              ,RESULT AS (
+
+                  SELECT stp.STAFF_ID, stp.CREATE_DATE 
+
+                  FROM STAFF_POSITION_LOG stp, RTIME, staff st
+
+                  WHERE
+
+                   stp.staff_id = st.staff_id  
+
+                   AND (gsnppId IS NULL OR (st.role_type = 10 AND
+st.STAFF_ID = gsnppId)  OR (st.role_type = 1 AND st.STAFF_ID IN (SELECT
+NV.STAFF_ID FROM STAFF NV WHERE NV.STAFF_OWNER_ID = gsnppId)))
+
+                   AND (staffId IS NULL OR st.STAFF_ID = staffId)
+
+                   AND (lstShopId is null or st.SHOP_ID IN (SELECT
+shop_id FROM p_shop))
+
+                   AND st.STAFF_OWNER_ID IS NOT NULL
+
+                   AND (st.status = 1 OR (st.status = 0 and
+trunc(st.update_time) > fromDate ))                  
+
+                   AND 
+
+                   ((
+
+                          stp.create_date > TO_DATE(RTIME.S_FROM_TIME ||
+' ' || TO_CHAR(stp.create_date, 'DD/MM/YYYY'), 'HH24:MI DD/MM/YYYY')
+
+                          AND stp.create_date < TO_DATE(RTIME.S_TO_TIME
+|| ' ' || TO_CHAR(stp.create_date, 'DD/MM/YYYY'), 'HH24:MI DD/MM/YYYY')
+
+                      )
+
+                      OR
+
+                      (
+
+                          stp.create_date > TO_DATE(RTIME.C_FROM_TIME ||
+' ' || TO_CHAR(stp.create_date, 'DD/MM/YYYY'), 'HH24:MI DD/MM/YYYY')
+
+                          AND stp.create_date < TO_DATE(RTIME.C_TO_TIME
+|| ' ' || TO_CHAR(stp.create_date, 'DD/MM/YYYY'), 'HH24:MI DD/MM/YYYY')
+
+                    ))
+
+                  
+
+                  AND create_date >= TRUNC (fromDate)
+
+                  AND create_date < TRUNC (toDate + 1) 
+
+                  AND stp.STAFF_ID IN
+
+                         (
+
+                            select distinct vp.staff_id from visit_plan
+vp inner join staff st on vp.staff_id = st.staff_id
+
+                           where  (
+
+                              st.role_type IN (20)
+
+                              and mod((trunc(stp.create_date,'iw') -
+trunc(vp.start_date,'iw')) / 7, decode(vp.week_sale, upper('MD'), 1,
+vp.week_sale)) = 0
+
+                                            and
+(trunc(stp.create_date,'iw') - trunc(vp.start_date,'iw')) >= 0
+
+                              and vp.active = 1 and trunc(vp.start_date)
+<= trunc(stp.create_date)
+
+                              AND (VP.END_DATE IS NULL OR
+TRUNC(stp.create_date) <= TRUNC(VP.END_DATE)) AND
+
+                              ((TRIM(TO_CHAR(stp.create_date,'DAY')) =
+'MONDAY' AND VP.MONDAY=1)
+
+                              OR (TRIM(TO_CHAR(stp.create_date,'DAY')) =
+'TUESDAY' AND VP.TUESDAY=1)
+
+                              OR (TRIM(TO_CHAR(stp.create_date,'DAY')) =
+'WEDNESDAY' AND VP.WEDNESDAY=1)
+
+                              OR (TRIM(TO_CHAR(stp.create_date,'DAY')) =
+'THURSDAY' AND VP.THURSDAY=1)
+
+                              OR (TRIM(TO_CHAR(stp.create_date,'DAY')) =
+'FRIDAY' AND VP.FRIDAY=1)
+
+                              or (trim(to_char(stp.create_date,'DAY')) =
+'SATURDAY' and vp.saturday=1)
+
+                              or (trim(to_char(stp.create_date,'DAY')) =
+'SUNDAY' and vp.sunday=1))
+
+                              )
+
+                              or
+
+                              (
+
+                              st.role_type in (1, 10)
+
+                              and vp.active = 1 and trunc(vp.start_date)
+<= trunc(stp.create_date)
+
+                              AND (VP.END_DATE IS NULL OR
+TRUNC(stp.create_date) <= TRUNC(VP.END_DATE)) AND
+
+                              ((TRIM(TO_CHAR(stp.create_date,'DAY')) =
+'MONDAY' AND VP.MONDAY=1)
+
+                              OR (TRIM(TO_CHAR(stp.create_date,'DAY')) =
+'TUESDAY' AND VP.TUESDAY=1)
+
+                              OR (TRIM(TO_CHAR(stp.create_date,'DAY')) =
+'WEDNESDAY' AND VP.WEDNESDAY=1)
+
+                              OR (TRIM(TO_CHAR(stp.create_date,'DAY')) =
+'THURSDAY' AND VP.THURSDAY=1)
+
+                              OR (TRIM(TO_CHAR(stp.create_date,'DAY')) =
+'FRIDAY' AND VP.FRIDAY=1)
+
+                              or (trim(to_char(stp.create_date,'DAY')) =
+'SATURDAY' and vp.saturday=1)
+
+                              or (trim(to_char(stp.create_date,'DAY')) =
+'SUNDAY' and vp.sunday=1))
+
+                              )
+
+                         )
+
+                         
+
+                  UNION ALL 
+
+                  
+
+                  SELECT ac.STAFF_ID, ac.start_time CREATE_DATE 
+
+                  FROM ACTION_LOG ac , RTIME, staff st
+
+                  WHERE 
+
+                   ac.staff_id = st.staff_id  
+
+                   AND (gsnppId IS NULL OR (st.role_type = 10 AND
+st.STAFF_ID = gsnppId)  OR (st.role_type = 1 AND st.STAFF_ID IN (SELECT
+NV.STAFF_ID FROM STAFF NV WHERE NV.STAFF_OWNER_ID = gsnppId)))
+
+                   AND (staffId IS NULL OR st.STAFF_ID = staffId)
+
+                   AND ('127' is null or st.SHOP_ID IN (SELECT shop_id
+FROM p_shop))
+
+                   AND st.STAFF_OWNER_ID IS NOT NULL
+
+                   AND (st.status = 1 OR (st.status = 0 and
+trunc(st.update_time) > fromDate ))                  
+
+                   AND 
+
+                    ((
+
+                        ac.start_time > TO_DATE(RTIME.S_FROM_TIME || ' '
+|| TO_CHAR(ac.start_time, 'DD/MM/YYYY'), 'HH24:MI DD/MM/YYYY')
+
+                        AND ac.start_time < TO_DATE(RTIME.S_TO_TIME || '
+' || TO_CHAR(ac.start_time, 'DD/MM/YYYY'), 'HH24:MI DD/MM/YYYY')
+
+                      )
+
+                    OR
+
+                      (
+
+                        ac.start_time > TO_DATE(RTIME.C_FROM_TIME || ' '
+|| TO_CHAR(ac.start_time, 'DD/MM/YYYY'), 'HH24:MI DD/MM/YYYY')
+
+                        AND ac.start_time < TO_DATE(RTIME.C_TO_TIME || '
+' || TO_CHAR(ac.start_time, 'DD/MM/YYYY'), 'HH24:MI DD/MM/YYYY')
+
+                    ))
+
+                  AND ac.start_time >= TRUNC (fromDate)
+
+                  AND ac.start_time < TRUNC (toDate + 1) AND
+(ac.OBJECT_TYPE=0 OR ac.OBJECT_TYPE=1 )
+
+                  AND ac.STAFF_ID IN
+
+                       (
+
+                          select distinct vp.staff_id from visit_plan vp
+inner join staff st on vp.staff_id = st.staff_id
+
+                          where  (
+
+                            st.role_type IN (20)
+
+                            and mod((trunc(ac.start_time,'iw') -
+trunc(vp.start_date,'iw')) / 7, decode(vp.week_sale, upper('MD'), 1,
+vp.week_sale)) = 0
+
+                                          and (trunc(ac.start_time,'iw')
+- trunc(vp.start_date,'iw')) >= 0
+
+                            and vp.active = 1 and trunc(vp.start_date)
+<= trunc(ac.start_time)
+
+                            AND (VP.END_DATE IS NULL OR
+TRUNC(ac.start_time) <= TRUNC(VP.END_DATE)) AND
+
+                            ((TRIM(TO_CHAR(ac.start_time,'DAY')) =
+'MONDAY' AND VP.MONDAY=1)
+
+                            OR (TRIM(TO_CHAR(ac.start_time,'DAY')) =
+'TUESDAY' AND VP.TUESDAY=1)
+
+                            OR (TRIM(TO_CHAR(ac.start_time,'DAY')) =
+'WEDNESDAY' AND VP.WEDNESDAY=1)
+
+                            OR (TRIM(TO_CHAR(ac.start_time,'DAY')) =
+'THURSDAY' AND VP.THURSDAY=1)
+
+                            OR (TRIM(TO_CHAR(ac.start_time,'DAY')) =
+'FRIDAY' AND VP.FRIDAY=1)
+
+                            or (trim(to_char(ac.start_time,'DAY')) =
+'SATURDAY' and vp.saturday=1)
+
+                            or (trim(to_char(ac.start_time,'DAY')) =
+'SUNDAY' and vp.sunday=1))
+
+                            )
+
+                            or
+
+                            (
+
+                            st.role_type in (1, 10)
+
+                            and vp.active = 1 and trunc(vp.start_date)
+<= trunc(ac.start_time)
+
+                            AND (VP.END_DATE IS NULL OR
+TRUNC(ac.start_time) <= TRUNC(VP.END_DATE)) AND
+
+                            ((TRIM(TO_CHAR(ac.start_time,'DAY')) =
+'MONDAY' AND VP.MONDAY=1)
+
+                            OR (TRIM(TO_CHAR(ac.start_time,'DAY')) =
+'TUESDAY' AND VP.TUESDAY=1)
+
+                            OR (TRIM(TO_CHAR(ac.start_time,'DAY')) =
+'WEDNESDAY' AND VP.WEDNESDAY=1)
+
+                            OR (TRIM(TO_CHAR(ac.start_time,'DAY')) =
+'THURSDAY' AND VP.THURSDAY=1)
+
+                            OR (TRIM(TO_CHAR(ac.start_time,'DAY')) =
+'FRIDAY' AND VP.FRIDAY=1)
+
+                            or (trim(to_char(ac.start_time,'DAY')) =
+'SATURDAY' and vp.saturday=1)
+
+                            or (trim(to_char(ac.start_time,'DAY')) =
+'SUNDAY' and vp.sunday=1))
+
+                            )
+
+                       )
+
+                       
+
+                  UNION ALL
+
+                  
+
+                  SELECT ac.STAFF_ID, ac.end_time CREATE_DATE
+
+                  FROM ACTION_LOG ac ,RTIME, staff st
+
+                  WHERE 
+
+                   ac.staff_id = st.staff_id  
+
+                   AND (gsnppId IS NULL OR (st.role_type = 10 AND
+st.STAFF_ID = gsnppId)  OR (st.role_type = 1 AND st.STAFF_ID IN (SELECT
+NV.STAFF_ID FROM STAFF NV WHERE NV.STAFF_OWNER_ID = gsnppId)))
+
+                   AND (staffId IS NULL OR st.STAFF_ID = staffId)
+
+                   AND ('127' is null or st.SHOP_ID IN (SELECT shop_id
+FROM p_shop))
+
+                   AND st.STAFF_OWNER_ID IS NOT NULL
+
+                   AND (st.status = 1 OR (st.status = 0 and
+trunc(st.update_time) > fromDate ))                  
+
+                   AND 
+
+                      ((
+
+                          ac.end_time > TO_DATE(RTIME.S_FROM_TIME || ' '
+|| TO_CHAR(ac.end_time, 'DD/MM/YYYY'), 'HH24:MI DD/MM/YYYY')
+
+                          AND ac.end_time < TO_DATE(RTIME.S_TO_TIME || '
+' || TO_CHAR(ac.end_time, 'DD/MM/YYYY'), 'HH24:MI DD/MM/YYYY')
+
+                      )
+
+                      OR
+
+                      (
+
+                          ac.end_time > TO_DATE(RTIME.C_FROM_TIME || ' '
+|| TO_CHAR(ac.end_time, 'DD/MM/YYYY'), 'HH24:MI DD/MM/YYYY')
+
+                          AND ac.end_time < TO_DATE(RTIME.C_TO_TIME || '
+' || TO_CHAR(ac.end_time, 'DD/MM/YYYY'), 'HH24:MI DD/MM/YYYY')
+
+                      ))
+
+                   AND ac.start_time >= TRUNC (fromDate)
+
+                   AND ac.start_time < TRUNC (toDate + 1) AND
+ac.end_time >= TRUNC (fromDate)
+
+                   AND ac.end_time < TRUNC (toDate + 1) AND
+(ac.OBJECT_TYPE=0 OR ac.OBJECT_TYPE=1 )
+
+                   AND ac.STAFF_ID IN
+
+                       (
+
+                          select distinct vp.staff_id from visit_plan vp
+inner join staff st on vp.staff_id = st.staff_id
+
+                          where  (
+
+                            st.role_type IN (20)
+
+                            and mod((trunc(ac.end_time,'iw') -
+trunc(vp.start_date,'iw')) / 7, decode(vp.week_sale, upper('MD'), 1,
+vp.week_sale)) = 0
+
+                                          and (trunc(ac.end_time,'iw') -
+trunc(vp.start_date,'iw')) >= 0
+
+                            and vp.active = 1 and trunc(vp.start_date)
+<= trunc(ac.end_time)
+
+                            AND (VP.END_DATE IS NULL OR
+TRUNC(ac.end_time) <= TRUNC(VP.END_DATE)) AND
+
+                            ((TRIM(TO_CHAR(ac.end_time,'DAY')) =
+'MONDAY' AND VP.MONDAY=1)
+
+                            OR (TRIM(TO_CHAR(ac.end_time,'DAY')) =
+'TUESDAY' AND VP.TUESDAY=1)
+
+                            OR (TRIM(TO_CHAR(ac.end_time,'DAY')) =
+'WEDNESDAY' AND VP.WEDNESDAY=1)
+
+                            OR (TRIM(TO_CHAR(ac.end_time,'DAY')) =
+'THURSDAY' AND VP.THURSDAY=1)
+
+                            OR (TRIM(TO_CHAR(ac.end_time,'DAY')) =
+'FRIDAY' AND VP.FRIDAY=1)
+
+                            or (trim(to_char(ac.end_time,'DAY')) =
+'SATURDAY' and vp.saturday=1)
+
+                            or (trim(to_char(ac.end_time,'DAY')) =
+'SUNDAY' and vp.sunday=1))
+
+                            )
+
+                            or
+
+                            (
+
+                            st.role_type in (1, 10)
+
+                            and vp.active = 1 and trunc(vp.start_date)
+<= trunc(ac.end_time)
+
+                            AND (VP.END_DATE IS NULL OR
+TRUNC(ac.end_time) <= TRUNC(VP.END_DATE)) AND
+
+                            ((TRIM(TO_CHAR(ac.end_time,'DAY')) =
+'MONDAY' AND VP.MONDAY=1)
+
+                            OR (TRIM(TO_CHAR(ac.end_time,'DAY')) =
+'TUESDAY' AND VP.TUESDAY=1)
+
+                            OR (TRIM(TO_CHAR(ac.end_time,'DAY')) =
+'WEDNESDAY' AND VP.WEDNESDAY=1)
+
+                            OR (TRIM(TO_CHAR(ac.end_time,'DAY')) =
+'THURSDAY' AND VP.THURSDAY=1)
+
+                            OR (TRIM(TO_CHAR(ac.end_time,'DAY')) =
+'FRIDAY' AND VP.FRIDAY=1)
+
+                            or (trim(to_char(ac.end_time,'DAY')) =
+'SATURDAY' and vp.saturday=1)
+
+                            or (trim(to_char(ac.end_time,'DAY')) =
+'SUNDAY' and vp.sunday=1))
+
+                            )
+
+                       )
+
+                )         
+
+              
+
+              , RDATE AS (SELECT VALUE FROM AP_PARAM WHERE CODE IN
+('S_FROM_TIME','S_TO_TIME','C_FROM_TIME','C_TO_TIME'))
+
+              
+
+              , RSTAFF AS (SELECT DISTINCT STAFF_ID, TRUNC(create_date)
+AS CREATE_DATE FROM RESULT)
+
+              
+
+              , RPWORKTIME AS
+
+              ( 
+
+              SELECT RSTAFF.STAFF_ID, 
+
+              CASE WHEN RSTAFF.CREATE_DATE IS NULL THEN NULL ELSE
+TO_DATE(RDATE.VALUE ||' '|| TO_CHAR(RSTAFF.CREATE_DATE, 'DD/MM/YYYY'),
+'HH24:MI DD/MM/YYYY') END AS CREATE_DATE 
+
+              FROM RDATE FULL JOIN RSTAFF ON (1=1) 
+
+--              where create_date != trunc(sysdate)
+
+              )              
+
+              , RPWORKTIME1 AS
+
+              ( 
+
+              SELECT RSTAFF.STAFF_ID , SYSDATE AS CREATE_DATE 
+
+              FROM DUAL FULL JOIN RSTAFF ON (1=1 AND
+TRUNC(RSTAFF.CREATE_DATE) = TRUNC(SYSDATE))
+
+              )
+
+              , RLOG AS 
+
+              (
+
+              SELECT RESULT.STAFF_ID, RESULT.CREATE_DATE FROM RESULT
+
+              UNION SELECT RPWORKTIME.STAFF_ID, RPWORKTIME.CREATE_DATE
+FROM RPWORKTIME
+
+              UNION SELECT RPWORKTIME1.STAFF_ID, RPWORKTIME1.CREATE_DATE
+FROM RPWORKTIME1
+
+--                                ORDER BY   staff_id, create_date
+
+              )
+
+              , R1 AS
+
+              (
+
+                   select   --t1.staff_id,
+
+                   case when st.role_type IN (1, 10) then (SELECT
+shop_code
+
+                            FROM   shop
+
+                           WHERE   shop_id =
+
+                                       (SELECT   parent_shop_id
+
+                                          FROM   shop
+
+                                         WHERE   shop_id = (SELECT
+parent_shop_id
+
+                                                              FROM
+shop
+
+                                                             where
+shop_id = st.shop_id)))
+
+                   when st.role_type in (20) then (
+
+                        select shop_code from shop where shop_id =
+(SELECT   parent_shop_id
+
+                                                from   shop
+
+                                               WHERE   shop_id =
+st.shop_id)
+
+                          )
+
+                    else null
+
+                    end
+
+                             mien,
+
+                         (SELECT   shop_code FROM   shop WHERE   shop_id
+= (SELECT   parent_shop_id FROM   shop WHERE   shop_id = st.shop_id))
+vung,
+
+                         (SELECT   shop_code FROM shop WHERE   shop_id =
+st.shop_id) manpp,
+
+                         (SELECT   shop_name FROM   shop WHERE   shop_id
+= st.shop_id) tennpp,
+
+                         (SELECT name FROM STAFF
+
+                            WHERE (staff_id = st.STAFF_OWNER_ID AND
+st.role_type = 1) OR (staff_id = st.STAFF_ID AND st.role_type = 10)
+
+                         ) tengsnpp,
+
+                         st.staff_code manv,
+
+                         st.name tennv,
+
+                         t1.create_date ORDERDATE,
+
+                         TO_CHAR(t1.create_date,'hh24:mi:ss') ||' - ' ||
+TO_CHAR(t2.create_date,'hh24:mi:ss')KHOANGTHOIGIANTATMAY,
+
+                         1 ORDERNUM
+
+                  FROM   (  SELECT   ROW_NUMBER () OVER (ORDER BY
+staff_id, create_date) stt,
+
+                                     staff_id,
+
+                                     create_date
+
+                              FROM   RLOG WHERE create_date <= SYSDATE
+
+                          ORDER BY   staff_id, create_date
+
+                          ) t1,
+
+                         (  SELECT   ROW_NUMBER () OVER (ORDER BY
+staff_id, create_date) stt,
+
+                                     staff_id,
+
+                                     create_date
+
+                              FROM   RLOG WHERE create_date <= SYSDATE
+
+                          ORDER BY   staff_id, create_date
+
+                          ) t2,
+
+                         staff st, RTIME
+
+                WHERE       t1.stt = t2.stt - 1
+
+                         AND t1.staff_id = t2.staff_id
+
+                         AND st.staff_id = t1.staff_id(+)
+
+                         AND TRUNC(t1.create_date) =
+TRUNC(t2.create_date)
+
+                         AND (
+
+                                   (
+
+                                       t1.create_date >=
+TO_DATE(RTIME.S_FROM_TIME || ' ' || TO_CHAR(t1.create_date,
+'DD/MM/YYYY'), 'HH24:MI DD/MM/YYYY')
+
+                                       AND t1.create_date <=
+TO_DATE(RTIME.S_TO_TIME || ' ' || TO_CHAR(t1.create_date, 'DD/MM/YYYY'),
+'HH24:MI DD/MM/YYYY')
+
+                                       AND t2.create_date >=
+TO_DATE(RTIME.S_FROM_TIME || ' ' || TO_CHAR(t2.create_date,
+'DD/MM/YYYY'), 'HH24:MI DD/MM/YYYY')
+
+                                       AND t2.create_date <=
+TO_DATE(RTIME.S_TO_TIME || ' ' || TO_CHAR(t2.create_date, 'DD/MM/YYYY'),
+'HH24:MI DD/MM/YYYY')
+
+                                   )
+
+                                   OR
+
+                                   (
+
+                                       t1.create_date >=
+TO_DATE(RTIME.C_FROM_TIME || ' ' || TO_CHAR(t1.create_date,
+'DD/MM/YYYY'), 'HH24:MI DD/MM/YYYY')
+
+                                       AND t1.create_date <=
+TO_DATE(RTIME.C_TO_TIME || ' ' || TO_CHAR(t1.create_date, 'DD/MM/YYYY'),
+'HH24:MI DD/MM/YYYY')
+
+                                       AND t2.create_date >=
+TO_DATE(RTIME.C_FROM_TIME || ' ' || TO_CHAR(t2.create_date,
+'DD/MM/YYYY'), 'HH24:MI DD/MM/YYYY')
+
+                                       AND t2.create_date <=
+TO_DATE(RTIME.C_TO_TIME || ' ' || TO_CHAR(t2.create_date, 'DD/MM/YYYY'),
+'HH24:MI DD/MM/YYYY')
+
+                                   )
+
+                              )
+
+                              
+
+                         AND (t2.create_date - t1.create_date) * 24 * 60
+> n_minutes                         
+
+          )                    
+
+         , R2 AS (
+
+                 SELECT  R1.mien
+
+                    ,R1.vung
+
+                    ,R1.manpp
+
+                    ,R1.tennpp
+
+                    ,R1.tengsnpp
+
+                    ,R1.manv
+
+                    ,R1.tennv
+
+                    ,R1.ORDERDATE
+
+                    ,COUNT(1)||'' KHOANGTHOIGIANTATMAY
+
+                    ,2 ORDERNUM
+
+                  FROM R1
+
+                  GROUP BY ROLLUP( R1.mien
+
+                    ,R1.vung
+
+                    ,(R1.manpp
+
+                    ,R1.tennpp)
+
+                    ,R1.tengsnpp
+
+                    ,(R1.manv
+
+                    ,R1.tennv)
+
+                    ,R1.ORDERDATE)
+
+           )
+
+         SELECT 
+
+            CASE WHEN ENDRESULT.mien IS NULL THEN cast('Tổng' as
+nvarchar2(10)) ELSE ENDRESULT.mien END mien
+
+            ,ENDRESULT.vung
+
+            ,ENDRESULT.manpp
+
+            ,ENDRESULT.tennpp
+
+            ,ENDRESULT.tengsnpp
+
+            ,ENDRESULT.manv
+
+            ,ENDRESULT.tennv
+
+            ,TO_CHAR(ENDRESULT.ORDERDATE,'dd/mm/yyyy') ORDERDATE
+
+            ,CASE WHEN ENDRESULT.KHOANGTHOIGIANTATMAY = '0' THEN NULL
+ELSE ENDRESULT.KHOANGTHOIGIANTATMAY END KHOANGTHOIGIANTATMAY
+
+        FROM
+
+        (
+
+            SELECT R1.* FROM R1 UNION SELECT R2.* FROM R2 WHERE
+R2.ORDERDATE IS NULL
+
+        ) ENDRESULT
+
+                     ORDER BY ENDRESULT.MIEN, ENDRESULT.VUNG,
+ENDRESULT.MANPP, ENDRESULT.TENGSNPP, ENDRESULT.MANV, ENDRESULT.ORDERDATE
+
+                        ;
+
+    END PROC_VT2;
+
+ 
+
+  PROCEDURE PROC_VT3(res OUT SYS_REFCURSOR , lstShopId NVARCHAR2,
+gsnppId NUMBER, staffId NUMBER, f_DateStr STRING, t_DateStr STRING) AS
+
+        toDate date;
+
+        fromDate date;
+
+    BEGIN
+
+        fromDate := to_date(f_DateStr, 'dd/mm/yyyy');
+
+        toDate := to_date(t_DateStr, 'dd/mm/yyyy');
+
+ 
+
+        OPEN res FOR
+
+        with p_shop as (
+
+            select distinct shop_id
+
+            from shop
+
+            connect by prior shop_id = parent_shop_id
+
+            start with shop_id in (select shop_id
+
+            from shop
+
+            where shop_id in (select regexp_substr(lstShopId,'[^,]+', 1,
+level)
+
+                from dual
+
+                connect by regexp_substr(lstShopId, '[^,]+', 1, level)
+is not null )
+
+            )
+
+        ),
+
+        r1 as(
+
+            select
+
+                (select shop_code from shop where level = 3 start with
+shop_id = npp.shop_id connect by prior parent_shop_id = shop_id) as
+mamien
+
+                ,(select shop_code from shop where level = 2 start with
+shop_id = npp.shop_id connect by prior parent_shop_id = shop_id) as
+mavung
+
+                ,npp.shop_code manpp
+
+                ,npp.shop_name tennpp
+
+                , (case when nvbh.role_type = 1 then (select name from
+staff where staff_id = nvbh.staff_owner_id)
+
+                    when nvbh.role_type in (10, 20) then nvbh.name
+
+                    else null end
+
+                ) as tengsnpp
+
+                ,nvbh.staff_code manvbh
+
+                ,nvbh.name tennvbh
+
+                ,to_char(start_time, 'dd/mm/yyyy') as ngay
+
+                ,(case when nvbh.role_type in (1, 10) then
+substr(cr.customer_code,5,7)||substr(cr.customer_code,0,3)
+
+                    when nvbh.role_type in (20) then cr.customer_code
+end) customer_code
+
+                ,cr.customer_name
+
+                ,cr.housenumber||' '||cr.street diachi
+
+                ,to_char(start_time,'hh24:mi:ss') thoigianbatdau
+
+                ,to_char(end_time,'hh24:mi:ss') thoigianketthuc
+
+                ,1 ordernum
+
+                ,start_time ordertime
+
+                ,(case when nvbh.role_type in (10, 20)
+
+                        then (case when alg.is_or = 0 then '' else '1'
+end)
+
+                    else '' end) tuyen
+
+                ,(case when alg.object_type = 1 then '1'
+
+                    else '' end) close
+
+                ,round (((end_time - start_time) * 24 * 60),0) phut
+
+                ,round (((end_time - start_time) * 24 * 3600),0) giay
+
+                , (case when nvl(cr.lng, -1) = -1 or nvl(cr.lat, -1) =
+-1 or lag (cr.lng) over (partition by nvbh.staff_id order by
+alg.start_time) = -1 or nvl(lag (cr.lat) over (partition by
+nvbh.staff_id order by alg.start_time), -1) = -1
+
+                    then 0
+
+                    else sdo_geom.sdo_distance (
+
+                            sdo_geometry (2001,8307, sdo_point_type
+(cr.lng, cr.lat, NULL), NULL, NULL),
+
+                            sdo_geometry (2001, 8307, sdo_point_type
+(lag (cr.lng) over (partition by nvbh.staff_id order by alg.start_time),
+lag (cr.lat) over (partition by nvbh.staff_id order by alg.start_time),
+NULL), NULL, NULL), 0.0001, 'unit=km'
+
+                        )
+
+                 end) as distance
+
+            from (
+
+                select *
+
+               from action_log
+
+                where (object_type = 0 or object_type=1)
+
+                    and start_time >= fromDate
+
+                    and start_time < toDate + 1
+
+            ) alg
+
+            inner join customer cr on alg.customer_id = cr.customer_id
+
+            inner join staff nvbh on alg.staff_id = nvbh.staff_id
+
+            inner join shop npp on (npp.shop_id = nvbh.shop_id)
+
+            where 1 = 1
+
+                and (nvbh.status = 1 or nvbh.status=0 and
+nvbh.update_time > fromDate)
+
+                and (alg.is_or = 0 or (alg.is_or = 1 and nvbh.role_type
+in (10, 20)))
+
+                and alg.staff_id in (select staff_id from staff where
+role_type in (1,10,20) and shop_id in (select shop_id from p_shop))
+
+                and (gsnppid is null or alg.staff_id = gsnppid or
+alg.staff_id in (select nv.staff_id from staff nv where
+nv.staff_owner_id = gsnppid))
+
+                and (staffid is null or alg.STAFF_ID = staffid)
+
+        ),
+
+        r2 as(
+
+            select
+
+                nvl(r1.mamien, r1.mavung) as mamien
+
+                ,r1.mavung
+
+                ,r1.manpp
+
+                ,r1.tennpp
+
+                ,r1.tengsnpp
+
+                ,r1.manvbh
+
+                ,r1.tennvbh
+
+                ,r1.ngay
+
+                ,(count(1) || '') as customer_code
+
+                ,null customer_name
+
+                ,null diachi
+
+                ,null thoigianbatdau
+
+                ,null thoigianketthuc
+
+                ,2 ordernum
+
+                ,null ordertime
+
+                ,null close
+
+                ,null tuyen
+
+                ,sum(distance) distance
+
+                ,sum(phut) phut
+
+                ,sum(giay) giay
+
+            from r1
+
+            group by rollup(r1.mamien
+
+                ,r1.mavung
+
+                ,(r1.manpp
+
+                ,r1.tennpp)
+
+                ,r1.tengsnpp
+
+                ,(r1.manvbh
+
+                ,r1.tennvbh)
+
+                ,r1.ngay)
+
+        ),
+
+        r3 as (
+
+            select nvl(r1.mamien, r1.mavung) as mamien, r1.mavung,
+r1.manpp, r1.tennpp, 
+
+                r1.tengsnpp, r1.manvbh, r1.tennvbh, r1.ngay, 
+
+                r1.customer_code, r1.customer_name, r1.diachi,
+r1.thoigianbatdau, 
+
+                r1.thoigianketthuc, r1.ordernum, r1.ordertime, r1.tuyen,
+r1.close, r1.phut, r1.giay, r1.distance
+
+            from r1
+
+            union 
+
+            select r2.mamien, r2.mavung, r2.manpp, r2.tennpp, 
+
+                r2.tengsnpp, r2.manvbh, r2.tennvbh, r2.ngay, 
+
+                r2.customer_code, r2.customer_name, r2.diachi,
+r2.thoigianbatdau, 
+
+                r2.thoigianketthuc, r2.ordernum, r2.ordertime, r2.tuyen,
+r2.close, r2.phut, r2.giay, r2.distance
+
+            from r2
+
+            where r2.customer_name is null
+
+        )
+
+        select
+
+        case when r3.mamien is null then cast('t?ng' as nvarchar2(10))
+else r3.mamien end mamien
+
+            ,r3.mavung
+
+            ,r3.manpp
+
+            ,r3.tennpp
+
+            ,r3.tengsnpp
+
+            ,r3.manvbh
+
+            ,r3.tennvbh
+
+            ,r3.ngay
+
+            ,r3.customer_code
+
+            ,r3.customer_name
+
+            ,r3.diachi
+
+            ,r3.thoigianbatdau
+
+            ,r3.thoigianketthuc
+
+            ,r3.close
+
+            ,r3.tuyen
+
+            ,r3.distance
+
+            ,r3.phut
+
+            ,r3.giay
+
+        from r3
+
+        order by
+
+            r3.mamien
+
+            ,r3.mavung
+
+            ,r3.manpp
+
+            ,r3.tengsnpp
+
+            ,r3.manvbh
+
+            ,r3.ngay
+
+            ,r3.ordernum
+
+            ,r3.ordertime;
+
+    END PROC_VT3;
+
+        PROCEDURE PROC_VT4(
+
+        res OUT SYS_REFCURSOR ,
+
+        lstShopId NVARCHAR2,
+
+        gsnppId  NUMBER,
+
+        staffId  NUMBER,
+
+        fromDate DATE,
+
+        toDate   DATE)
+
+    AS
+
+    BEGIN
+
+    
+
+     /* if trunc(sysdate) <= trunc(fromDate)
+
+        then */
+
+        OPEN res FOR
+
+        WITH
+
+        p_shop AS
+
+                  (
+
+                  SELECT shop_id
+
+                  FROM shop
+
+                    CONNECT BY PRIOR shop_id = parent_shop_id
+
+                    START WITH shop_id      IN
+
+                    (SELECT shop_id
+
+                    FROM shop
+
+                    WHERE shop_id IN
+
+                      (SELECT regexp_substr(lstShopId,'[^,]+', 1, level)
+
+                      FROM dual
+
+                        CONNECT BY regexp_substr(lstShopId, '[^,]+', 1,
+level) IS NOT NULL
+
+                      )
+
+                    )
+
+                  GROUP BY shop_id
+
+                  ),
+
+        R1 AS
+
+          (select
+
+            case when st.role_type = 20 then (select shop_code 
+
+                                              from shop 
+
+                                              where shop_id = (select
+parent_shop_id from shop where shop_id = st.shop_id)
+
+                                              )
+
+                 else (SELECT shop_code
+
+                       FROM shop
+
+                       WHERE shop_id =
+
+                       (SELECT parent_shop_id
+
+                       FROM shop
+
+                       WHERE shop_id =
+
+                       (SELECT parent_shop_id FROM shop WHERE shop_id =
+st.shop_id)
+
+                          )
+
+                      )
+
+            end mien,
+
+            (SELECT shop_code
+
+            FROM shop
+
+            WHERE shop_id =
+
+              (SELECT parent_shop_id FROM shop WHERE shop_id =
+st.shop_id
+
+              )
+
+            ) vung,
+
+            (SELECT shop_code FROM shop WHERE shop_id = st.shop_id
+
+            ) manpp,
+
+            (SELECT shop_name FROM shop WHERE shop_id = st.shop_id
+
+            ) tennpp,
+
+            (SELECT name FROM STAFF WHERE (staff_id = st.STAFF_OWNER_ID
+AND st.ROLE_TYPE = 1) OR (staff_id = st.STAFF_ID AND st.ROLE_TYPE = 10)
+or (staff_id = st.staff_id and st.role_type = 20)
+
+            ) tengsnpp,
+
+            st.staff_code,
+
+            st.staff_id,
+
+            st.name,
+
+            TO_CHAR(result.day,'DD/MM/YYYY') ngay,
+
+            to_char (result.day, 'D') thu,
+
+            result.day day,
+
+            case when st.role_type = 20 then cm.customer_code
+
+            else
+SUBSTR(cm.CUSTOMER_CODE,5,7)||SUBSTR(cm.CUSTOMER_CODE,0,3) end
+customer_code,
+
+            cm.CUSTOMER_NAME,
+
+            cm.customer_id,
+
+            cm.HOUSENUMBER
+
+            ||' '
+
+            ||cm.STREET DIACHI,
+
+            1 ORDERNUM
+
+          FROM
+
+            (SELECT distinct vp.staff_id, vp.customer_id, days.day
+
+             FROM visit_plan vp, staff st_tmp, customer cm,
+
+                (SELECT TRUNC (fromDate) + LEVEL - 1 DAY
+
+                 FROM DUAL
+
+                 CONNECT BY LEVEL <= (TRUNC(toDate) - TRUNC(fromDate) +
+1)
+
+                 ORDER BY DAY
+
+                 ) days
+
+             WHERE
+
+                  vp.staff_id     = st_tmp.staff_id
+
+                  AND vp.customer_id = cm.customer_id
+
+                  AND active                   = 1    
+
+                  AND trunc(vp.start_date) <= trunc(days.day)
+
+                  AND (vp.end_date is null or trunc(vp.end_date) >=
+trunc(days.day))    
+
+                  AND ( (TO_CHAR (DAY, 'D')      = 2
+
+                      AND vp.monday                  = 1)
+
+                      OR (TO_CHAR (DAY, 'D')         = 3
+
+                      AND vp.tuesday                 = 1)
+
+                      OR (TO_CHAR (DAY, 'D')         = 4
+
+                      AND vp.wednesday               = 1)
+
+                      OR (TO_CHAR (DAY, 'D')         = 5
+
+                      AND vp.thursday                = 1)
+
+                      OR (TO_CHAR (DAY, 'D')         = 6
+
+                      AND vp.friday                  = 1)
+
+                      OR (TO_CHAR (DAY, 'D')         = 7
+
+                      AND vp.saturday                = 1)
+
+                      OR (TO_CHAR (DAY, 'D')         = 1
+
+                      AND vp.sunday                = 1))
+
+                  AND(
+
+                        (
+
+                         st_tmp.role_type in (20)    
+
+                          and (
+
+                          mod((trunc(days.day,'iw') -
+trunc(vp.start_date,'iw')) / 7,
+decode(vp.week_sale,'MD',1,vp.week_sale)) = 0
+
+                          and (trunc(days.day,'iw') -
+trunc(vp.start_date,'iw')) >= 0
+
+                          )
+
+                        )
+
+                        or 
+
+                        (          
+
+                         st_tmp.role_type in (1, 10)      
+
+                        )
+
+                    )
+
+              
+
+                  AND (st_tmp.status = 1 OR (st_tmp.status = 0 and
+trunc(st_tmp.update_time) > fromDate ))
+
+                  AND (null         IS NULL
+
+                       OR st_tmp.STAFF_ID = null
+
+                       OR st_tmp.STAFF_ID   IN
+
+                       (SELECT NV.STAFF_ID FROM STAFF NV WHERE
+NV.STAFF_OWNER_ID = null
+
+                       ))
+
+                  AND (null      IS NULL
+
+                      OR st_tmp.STAFF_ID = null)
+
+                  AND st_tmp.SHOP_ID    IN (SELECT shop_id FROM p_shop)
+AND (days.day >= (select min(start_date) from visit_plan where
+customer_id =cm.customer_id and staff_id=st_tmp.staff_id))      
+
+                  AND cm.status         = 1      
+
+                  AND NOT EXISTS (
+
+                            SELECT distinct staff_id
+
+                            FROM action_log
+
+                            WHERE (object_type        = 0 or object_type
+= 1)
+
+                            AND is_or              = 0
+AND staff_id = vp.staff_id
+
+                            AND customer_id = vp.customer_id
+
+                            AND start_time >= trunc(days.day)
+
+                            AND start_time < trunc(days.day) +1    
+
+                            )
+
+            ) result,
+
+            staff st,
+
+            customer cm    
+
+           WHERE result.staff_id = st.staff_id 
+
+           and result.customer_id = cm.customer_id
+
+           --  AND st.role_type      in (1,10,20)
+
+          )
+
+          ,
+
+          --add create_date of visit_plan
+
+          R4 AS(
+
+          select R1.mien ,
+
+            R1.vung ,
+
+            R1.manpp ,
+
+            R1.tennpp ,
+
+            R1.tengsnpp ,
+
+            R1.staff_code ,
+
+            R1.name ,
+
+            R1.ngay ,
+
+            R1. thu ,
+
+            R1.customer_code ,
+
+             R1.customer_name ,
+
+             R1.diachi ,
+
+            R1.ORDERNUM,
+
+            vp1.create_date
+
+          from R1,visit_plan vp1
+
+          where R1.staff_id=vp1.staff_id
+
+          and   R1.customer_id= vp1.customer_id
+
+          and vp1.active=1
+
+          AND TRUNC(vp1.start_date) <= TRUNC(R1.day)
+
+          AND (vp1.end_date is null or TRUNC(vp1.end_date) >=
+TRUNC(R1.day))
+
+          )  
+
+          ,
+
+          R2 AS
+
+          (SELECT R4.mien ,
+
+            R4.vung ,
+
+            R4.manpp ,
+
+            R4.tennpp ,
+
+            R4.tengsnpp ,
+
+            R4.staff_code ,
+
+            R4.name ,
+
+            R4.ngay ,
+
+            R4. thu ,
+
+            COUNT(1)
+
+            ||'' customer_code ,
+
+            NULL customer_name ,
+
+            NULL diachi ,
+
+            2 ORDERNUM,
+
+            R4.create_date
+
+          FROM R4
+
+          GROUP BY ROLLUP( R4.mien,R4.vung ,(R4.manpp ,R4.tennpp)
+,R4.tengsnpp ,(R4.staff_code ,R4.name) ,(R4.ngay,
+R4.THU),R4.create_date)
+
+          ) ,
+
+          
+
+          R3 AS
+
+          (SELECT R4.* FROM R4
+
+          UNION
+
+          SELECT R2.* FROM R2 WHERE R2.thu IS NULL
+
+          )
+
+        SELECT 
+
+          CASE
+
+            WHEN R3.mien IS NULL
+
+            THEN cast('Tổng' as nvarchar2(10))
+
+            ELSE R3.mien
+
+          END mien ,
+
+          R3.vung ,
+
+          R3.MANPP ,
+
+          R3.TENNPP ,
+
+          R3.TENGSNPP ,
+
+          R3.staff_code ,
+
+          R3.name ,
+
+          R3.NGAY ,
+
+          R3.THU ,
+
+          R3.customer_code ,
+
+          R3.CUSTOMER_NAME ,
+
+          R3.DIACHI,
+
+          TO_CHAR(R3.create_date,'DD/MM/YYYY') create_date
+
+        FROM R3
+
+        ORDER BY R3.mien,
+
+          R3.vung ,
+
+          R3.MANPP ,
+
+          R3.TENGSNPP ,
+
+          R3.staff_code ,
+
+          R3.NGAY,
+
+          R3.customer_code;
+
+    END PROC_VT4;
+
+ 
+
+-- PROCEDURE PROC_VT5(res OUT SYS_REFCURSOR , lstShopId NVARCHAR2,
+staffId NUMBER, fromDate DATE, toDate DATE) AS
+
+--  dateNum NUMBER(3);
+
+--  strSQL CLOB;
+
+--  strSQL1 CLOB;
+
+--  strSQL2 CLOB;
+
+--  strSQL3 CLOB;
+
+--  strSQL4 CLOB;
+
+--  strSQL5 CLOB;
+
+--  strSQL6 CLOB;
+
+--  strSQL7 CLOB;
+
+--  strSQL8 CLOB;
+
+--  strSQL9 CLOB;
+
+--  dayOff NUMBER(3);
+
+--  dayWork NUMBER(3);
+
+--  BEGIN
+
+--   dateNum:= trunc(toDate) - trunc(fromDate);
+
+--    strSQL:= '';
+
+--    strSQL1:= '';
+
+--    strSQL2:='';
+
+--    strSQL3:='';
+
+--    strSQL4:='';
+
+--    strSQL5:='';
+
+--    strSQL6:='';
+
+--    strSQL7:='';
+
+--    strSQL8:='';
+
+--    strSQL9:='SELECT tmp.mien mienCode,tmp.vung vungCode,tmp.manpp
+shopCode,tmp.tennpp shopName,tmp.manv staffCode,tmp.tennv staffName,(';
+
+--    dayWork:=0;
+
+--    strSQL7:= ' GROUP BY ROLLUP (RR1.MIEN,RR1.VUNG, (RR1.MANPP,
+RR1.TENNPP))';
+
+--    --strSQL7:= ' GROUP BY RR1.MIEN,RR1.VUNG, RR1.MANPP, RR1.TENNPP';
+
+--
+
+--    if trunc(sysdate) <= trunc(fromDate)
+
+--      then
+
+--        IF staffId IS NOT NULL THEN
+
+--        strSQL3:= ' AND STAFF_ID ='||staffId ||' ';
+
+--    END IF;
+
+--    IF lstShopId IS NOT NULL THEN
+
+--        strSQL4:= ' AND SHOP_ID IN
+
+--              (
+
+--          SELECT shop_id
+
+--          FROM shop
+
+--            CONNECT BY PRIOR shop_id = parent_shop_id
+
+--            START WITH shop_id      IN
+
+--            (SELECT shop_id
+
+--            FROM shop
+
+--            WHERE shop_id IN
+
+--              (SELECT regexp_substr(''' || lstShopId || ''',''[^,]+'',
+1, level)
+
+--              FROM dual
+
+--                CONNECT BY regexp_substr(''' || lstShopId || ''',
+''[^,]+'', 1, level) IS NOT NULL
+
+--              )
+
+--            )
+
+--          GROUP BY shop_id
+
+--          ) ';
+
+--    END IF;
+
+--
+
+--    FOR num IN 0..dateNum LOOP
+
+--        SELECT COUNT(1) INTO dayOff FROM EXCEPTION_DAY WHERE
+TRUNC(DAY_OFF) = TRUNC(fromDate + num);
+
+--        IF trunc(fromDate + num) > trunc(sysdate) THEN
+
+--        --IF TO_CHAR(fromDate + num,'D') = 1 OR dayOff > 0 or
+trunc(fromDate + num) >= trunc(sysdate) THEN
+
+--            CONTINUE;
+
+--        ELSE
+
+--
+
+--        IF strSQL IS NULL THEN
+
+--            strSQL9:=strSQL9|| '''' || TO_CHAR(fromDate +
+num,'DD/MM/YYYY') || ':''||N' || TO_CHAR(fromDate + num,'DD_MM_YYYY');
+
+--                strSQL:= ' WITH R'||num||
+
+--                       ' AS ( SELECT
+
+--DISTINCT STAFF_ID, ''X'' DILAM , ROLE_TYPE, SHOP_ID
+
+--FROM STAFF
+
+--WHERE
+
+--(STATUS = 1 OR (STATUS = 0 AND TO_DATE('''||TO_CHAR(fromDate +
+num,'DD/MM/YYYY')||''',''DD/MM/YYYY'') < TRUNC(UPDATE_TIME)))
+
+--AND ROLE_TYPE IN (1,2,3,10,11,20) '||
+
+--                                     strSQL3||
+
+--                                     strSQL4|| '
+
+--AND STAFF_ID NOT IN
+
+--(
+
+--SELECT DISTINCT STAFF_ID FROM
+
+--STAFF_POSITION_LOG WHERE TRUNC(CREATE_DATE) =
+TO_DATE('''||TO_CHAR(fromDate + num,'DD/MM/YYYY')||''',''DD/MM/YYYY'')
+
+--)
+
+--AND STAFF_ID IN
+
+--(
+
+--SELECT DISTINCT VP.STAFF_ID FROM VISIT_PLAN VP JOIN CUSTOMER CUS ON
+VP.CUSTOMER_ID = CUS.CUSTOMER_ID WHERE  VP.ACTIVE = 1 AND
+
+--TRUNC(VP.START_DATE) <= TRUNC(TO_DATE('''||TO_CHAR(fromDate +
+num,'DD/MM/YYYY')||''',''DD/MM/YYYY''))
+
+--AND (VP.END_DATE IS NULL OR TRUNC(TO_DATE('''||TO_CHAR(fromDate +
+num,'DD/MM/YYYY')||''',''DD/MM/YYYY'')) <= TRUNC(VP.END_DATE)) AND
+
+--VP.'||TRIM(TO_CHAR(fromDate + num,'DAY',
+'nls_date_language=english'))||'=1
+
+--AND CUS.STATUS = 1
+
+--)
+
+--) ';
+
+--            ELSE
+
+--              strSQL9:=strSQL9|| '||'',''||' || '''' ||
+TO_CHAR(fromDate + num,'DD/MM/YYYY') || ':''||N' || TO_CHAR(fromDate +
+num,'DD_MM_YYYY');
+
+--                strSQL:= strSQL||', R'||num||
+
+--                           ' AS ( SELECT
+
+--DISTINCT STAFF_ID, ''X'' DILAM , ROLE_TYPE, SHOP_ID
+
+--FROM
+
+--STAFF
+
+--WHERE
+
+--(STATUS = 1 OR (STATUS = 0 AND TO_DATE('''||TO_CHAR(fromDate +
+num,'DD/MM/YYYY')||''',''DD/MM/YYYY'') < TRUNC(UPDATE_TIME)))
+
+--AND ROLE_TYPE IN (1,2,3,10,11,20) '||
+
+--                                          strSQL3||
+
+--                                          strSQL4|| '
+
+--AND STAFF_ID NOT IN
+
+--(
+
+--SELECT DISTINCT STAFF_ID FROM
+
+--STAFF_POSITION_LOG WHERE CREATE_DATE >=
+TO_DATE('''||TO_CHAR(fromDate+num ,'DD/MM/YYYY')||''',''DD/MM/YYYY'')
+
+--AND CREATE_DATE < TO_DATE('''||TO_CHAR(fromDate+num
+,'DD/MM/YYYY')||''',''DD/MM/YYYY'') + 1
+
+--)
+
+--AND STAFF_ID IN
+
+--(
+
+--SELECT DISTINCT VP.STAFF_ID FROM VISIT_PLAN VP JOIN CUSTOMER CUS ON
+VP.CUSTOMER_ID = CUS.CUSTOMER_ID WHERE  VP.ACTIVE = 1 AND
+
+--TRUNC(VP.START_DATE) <= TRUNC(TO_DATE('''||TO_CHAR(fromDate +
+num,'DD/MM/YYYY')||''',''DD/MM/YYYY''))
+
+--AND (VP.END_DATE IS NULL OR TRUNC(TO_DATE('''||TO_CHAR(fromDate +
+num,'DD/MM/YYYY')||''',''DD/MM/YYYY'')) <= TRUNC(VP.END_DATE)) AND
+
+--VP.'||TRIM(TO_CHAR(fromDate + num,'DAY',
+'nls_date_language=english'))||'=1
+
+--AND CUS.STATUS = 1
+
+--)
+
+--) ';
+
+--            END IF;
+
+--
+
+--            strSQL2:= strSQL2||',(SELECT R'||num||'.DILAM FROM
+R'||num||' WHERE R'||num||'.STAFF_ID = RESULT.STAFF_ID) N'||
+TO_CHAR(fromDate + num,'DD_MM_YYYY');
+
+--            strSQL6:= strSQL6||', COUNT(RR1.N'|| TO_CHAR(fromDate +
+num,'DD_MM_YYYY')||')||'''' N'|| TO_CHAR(fromDate + num,'DD_MM_YYYY');
+
+--            strSQL8:= strSQL8||',RR3.N'|| TO_CHAR(fromDate +
+num,'DD_MM_YYYY');
+
+--            IF dayWork = 0 THEN
+
+--                strSQL1:= ' SELECT DISTINCT STAFF_ID, ROLE_TYPE,
+SHOP_ID FROM (SELECT STAFF_ID, ROLE_TYPE, SHOP_ID FROM R'||num;
+
+--                strSQL5:= 'SELECT STAFF_ID, ROLE_TYPE, SHOP_ID FROM
+R'||num;
+
+--            ELSE
+
+--                strSQL1:= strSQL1||' UNION SELECT  STAFF_ID,
+ROLE_TYPE, SHOP_ID FROM R'||num;
+
+--            END IF;
+
+--            dayWork:= dayWork + 1;
+
+--        END IF;
+
+--    END LOOP;
+
+--
+
+--    IF dayWork = 1 THEN
+
+--        strSQL1:= strSQL5;
+
+--    ELSIF dayWork > 1 THEN
+
+--        strSQL1:= strSQL1||')';
+
+--    END IF;
+
+--
+
+--
+
+--     strSQL:=strSQL||', RR1 AS( SELECT
+
+--CASE
+
+--WHEN RESULT.ROLE_TYPE = 3 THEN (SELECT SHOP_CODE FROM SHOP WHERE
+SHOP_ID = (SELECT PARENT_SHOP_ID FROM SHOP WHERE SHOP_ID =
+RESULT.SHOP_ID))
+
+--when result.role_type = 20 then (select shop_code from shop WHERE
+SHOP_ID = (select parent_shop_id from shop where shop_id =
+result.shop_id))
+
+--ELSE (SELECT SHOP_CODE FROM SHOP WHERE SHOP_ID = (SELECT
+PARENT_SHOP_ID FROM SHOP WHERE SHOP_ID = (SELECT PARENT_SHOP_ID FROM
+SHOP WHERE SHOP_ID = RESULT.SHOP_ID)))
+
+--END MIEN
+
+--,CASE
+
+--WHEN RESULT.ROLE_TYPE = 3 THEN (SELECT SHOP_CODE FROM SHOP WHERE
+SHOP_ID = RESULT.SHOP_ID)
+
+--ELSE (SELECT SHOP_CODE FROM SHOP WHERE SHOP_ID = (SELECT
+PARENT_SHOP_ID FROM SHOP WHERE SHOP_ID = RESULT.SHOP_ID))
+
+--END VUNG
+
+--,CASE
+
+--WHEN RESULT.ROLE_TYPE = 1 OR RESULT.ROLE_TYPE = 2 THEN (SELECT
+SHOP_CODE FROM SHOP WHERE SHOP_ID = RESULT.SHOP_ID)
+
+--when result.role_type = 20 then (select shop_code from shop where
+shop_id = result.shop_id)
+
+--ELSE NULL
+
+--END MANPP
+
+--,CASE
+
+--WHEN RESULT.ROLE_TYPE = 1 OR RESULT.ROLE_TYPE = 2 THEN (SELECT
+SHOP_NAME FROM SHOP WHERE SHOP_ID = RESULT.SHOP_ID)
+
+--when result.role_type = 20 then (select shop_name from shop where
+shop_id = result.shop_id)
+
+--ELSE NULL
+
+--END TENNPP
+
+--,(SELECT STAFF_CODE FROM STAFF WHERE STAFF_ID = RESULT.STAFF_ID) MANV
+
+--,(SELECT NAME FROM STAFF WHERE STAFF_ID = RESULT.STAFF_ID) TENNV '||
+
+--                                 strSQL2||', 1 ORDERNUM';
+
+--
+
+--    strSQL:=strSQL||' FROM ('||strSQL1||') RESULT )';
+
+--    strSQL:= strSQL||', RR2 AS( SELECT RR1.MIEN, RR1.VUNG,RR1.MANPP,
+RR1.TENNPP, NULL MANV, NULL TENNV'||strSQL6||', 2 ORDERNUM  FROM
+RR1'||strSQL7||')';
+
+--    strSQL:= strSQL||', RR3 AS ( SELECT * FROM RR1 UNION SELECT * FROM
+RR2) ';
+
+--    strSQL:= strSQL||' SELECT CASE WHEN RR3.MIEN IS NULL THEN
+N''T?ng'' ELSE RR3.MIEN END MIEN, RR3.VUNG, RR3.MANPP, RR3.TENNPP,
+RR3.MANV, RR3.TENNV'||strSQL8
+
+--                   ||' FROM RR3 ORDER BY RR3.VUNG, RR3.MIEN,
+RR3.MANPP, RR3.MANV, RR3.ORDERNUM';
+
+--   strSQL9 := strSQL9 || ')summaryValue from(';
+
+--   strSQL9 := strSQL9 || strSQL;
+
+--   strSQL9 := strSQL9 || ')tmp';
+
+--   strSQL9 := strSQL9 || ' order by tmp.mien, tmp.vung, tmp.manpp,
+tmp.manv';
+
+--  DBMS_OUTPUT.PUT_LINE('SQL = ' || strSQL9);
+
+--  --IF dayWork <> 0 THEN
+
+--    OPEN res FOR strSQL9 ;
+
+--  --else
+
+--   -- OPEN res FOR select 1 from dual where 1 <> 1 ;
+
+--  --end if;
+
+--    else
+
+--      IF staffId IS NOT NULL THEN
+
+--        strSQL3:= ' AND STAFF_ID ='||staffId ||' ';
+
+--    END IF;
+
+--    IF lstShopId IS NOT NULL THEN
+
+--        strSQL4:= ' AND SHOP_ID IN
+
+--              (
+
+--          SELECT shop_id
+
+--          FROM shop
+
+--            CONNECT BY PRIOR shop_id = parent_shop_id
+
+--            START WITH shop_id      IN
+
+--            (SELECT shop_id
+
+--            FROM shop
+
+--            WHERE shop_id IN
+
+--              (SELECT regexp_substr(''' || lstShopId || ''',''[^,]+'',
+1, level)
+
+--              FROM dual
+
+--                CONNECT BY regexp_substr(''' || lstShopId || ''',
+''[^,]+'', 1, level) IS NOT NULL
+
+--              )
+
+--            )
+
+--          GROUP BY shop_id
+
+--          ) ';
+
+--    END IF;
+
+--
+
+--    FOR num IN 0..dateNum LOOP
+
+--        SELECT COUNT(1) INTO dayOff FROM EXCEPTION_DAY WHERE
+TRUNC(DAY_OFF) = TRUNC(fromDate + num);
+
+--        IF trunc(fromDate + num) > trunc(sysdate) THEN
+
+--        --IF TO_CHAR(fromDate + num,'D') = 1 OR dayOff > 0 or
+trunc(fromDate + num) >= trunc(sysdate) THEN
+
+--            CONTINUE;
+
+--        ELSE
+
+--
+
+--        IF strSQL IS NULL THEN
+
+--            strSQL9:=strSQL9|| '''' || TO_CHAR(fromDate +
+num,'DD/MM/YYYY') || ':''||N' || TO_CHAR(fromDate + num,'DD_MM_YYYY');
+
+--                strSQL:= ' WITH R'||num||
+
+--                       ' AS ( SELECT
+
+--DISTINCT STAFF_ID, ''X'' DILAM , ROLE_TYPE, SHOP_ID
+
+--FROM STAFF
+
+--WHERE
+
+--(STATUS = 1 OR (STATUS = 0 AND TO_DATE('''||TO_CHAR(fromDate +
+num,'DD/MM/YYYY')||''',''DD/MM/YYYY'') < TRUNC(UPDATE_TIME)))
+
+--AND ROLE_TYPE IN (1,2,3,10,11,20) '||
+
+--                                     strSQL3||
+
+--                                     strSQL4|| '
+
+--AND STAFF_ID NOT IN
+
+--(
+
+--SELECT DISTINCT STAFF_ID FROM
+
+--STAFF_POSITION_LOG WHERE CREATE_DATE >=
+TO_DATE('''||TO_CHAR(fromDate+num ,'DD/MM/YYYY')||''',''DD/MM/YYYY'')
+
+--AND CREATE_DATE < TO_DATE('''||TO_CHAR(fromDate+num
+,'DD/MM/YYYY')||''',''DD/MM/YYYY'') + 1
+
+--)
+
+--AND STAFF_ID IN
+
+--(
+
+--SELECT DISTINCT VP.STAFF_ID FROM VISIT_PLAN_LOG VP JOIN CUSTOMER CUS
+ON VP.CUSTOMER_ID = CUS.CUSTOMER_ID WHERE  VP.ACTIVE = 1 AND
+
+--TRUNC(VP.START_DATE) <= TRUNC(TO_DATE('''||TO_CHAR(fromDate +
+num,'DD/MM/YYYY')||''',''DD/MM/YYYY''))
+
+--AND (VP.END_DATE IS NULL OR TRUNC(TO_DATE('''||TO_CHAR(fromDate +
+num,'DD/MM/YYYY')||''',''DD/MM/YYYY'')) <= TRUNC(VP.END_DATE)) AND
+
+--VP.'||TRIM(TO_CHAR(fromDate + num,'DAY',
+'nls_date_language=english'))||'=1
+
+--AND CUS.STATUS = 1
+
+--)
+
+--) ';
+
+--            ELSE
+
+--              strSQL9:=strSQL9|| '||'',''||' || '''' ||
+TO_CHAR(fromDate + num,'DD/MM/YYYY') || ':''||N' || TO_CHAR(fromDate +
+num,'DD_MM_YYYY');
+
+--                strSQL:= strSQL||', R'||num||
+
+--                           ' AS ( SELECT
+
+--DISTINCT STAFF_ID, ''X'' DILAM , ROLE_TYPE, SHOP_ID
+
+--FROM
+
+--STAFF
+
+--WHERE
+
+--(STATUS = 1 OR (STATUS = 0 AND TO_DATE('''||TO_CHAR(fromDate +
+num,'DD/MM/YYYY')||''',''DD/MM/YYYY'') < TRUNC(UPDATE_TIME)))
+
+--AND ROLE_TYPE IN (1,2,3,10,11, 20) '||
+
+--                                          strSQL3||
+
+--                                          strSQL4|| '
+
+--AND STAFF_ID NOT IN
+
+--(
+
+--SELECT DISTINCT STAFF_ID FROM
+
+--STAFF_POSITION_LOG WHERE TRUNC(CREATE_DATE) =
+TO_DATE('''||TO_CHAR(fromDate+num ,'DD/MM/YYYY')||''',''DD/MM/YYYY'')
+
+--)
+
+--AND STAFF_ID IN
+
+--(
+
+--SELECT DISTINCT VP.STAFF_ID FROM VISIT_PLAN_LOG VP JOIN CUSTOMER CUS
+ON VP.CUSTOMER_ID = CUS.CUSTOMER_ID WHERE  VP.ACTIVE = 1 AND
+
+--TRUNC(VP.START_DATE) <= TRUNC(TO_DATE('''||TO_CHAR(fromDate +
+num,'DD/MM/YYYY')||''',''DD/MM/YYYY''))
+
+--AND (VP.END_DATE IS NULL OR TRUNC(TO_DATE('''||TO_CHAR(fromDate +
+num,'DD/MM/YYYY')||''',''DD/MM/YYYY'')) <= TRUNC(VP.END_DATE)) AND
+
+--VP.'||TRIM(TO_CHAR(fromDate + num,'DAY',
+'nls_date_language=english'))||'=1
+
+--AND CUS.STATUS = 1
+
+--)
+
+--) ';
+
+--            END IF;
+
+--
+
+--            strSQL2:= strSQL2||',(SELECT R'||num||'.DILAM FROM
+R'||num||' WHERE R'||num||'.STAFF_ID = RESULT.STAFF_ID) N'||
+TO_CHAR(fromDate + num,'DD_MM_YYYY');
+
+--            strSQL6:= strSQL6||', COUNT(RR1.N'|| TO_CHAR(fromDate +
+num,'DD_MM_YYYY')||')||'''' N'|| TO_CHAR(fromDate + num,'DD_MM_YYYY');
+
+--            strSQL8:= strSQL8||',RR3.N'|| TO_CHAR(fromDate +
+num,'DD_MM_YYYY');
+
+--            IF dayWork = 0 THEN
+
+--                strSQL1:= ' SELECT DISTINCT STAFF_ID, ROLE_TYPE,
+SHOP_ID FROM (SELECT STAFF_ID, ROLE_TYPE, SHOP_ID FROM R'||num;
+
+--                strSQL5:= 'SELECT STAFF_ID, ROLE_TYPE, SHOP_ID FROM
+R'||num;
+
+--            ELSE
+
+--                strSQL1:= strSQL1||' UNION SELECT  STAFF_ID,
+ROLE_TYPE, SHOP_ID FROM R'||num;
+
+--            END IF;
+
+--            dayWork:= dayWork + 1;
+
+--        END IF;
+
+--    END LOOP;
+
+--
+
+--    IF dayWork = 1 THEN
+
+--        strSQL1:= strSQL5;
+
+--    ELSIF dayWork > 1 THEN
+
+--        strSQL1:= strSQL1||')';
+
+--    END IF;
+
+--
+
+--
+
+--     strSQL:=strSQL||', RR1 AS( SELECT
+
+--CASE
+
+--WHEN RESULT.ROLE_TYPE = 3 THEN (SELECT SHOP_CODE FROM SHOP WHERE
+SHOP_ID = (SELECT PARENT_SHOP_ID FROM SHOP WHERE SHOP_ID =
+RESULT.SHOP_ID))
+
+--WHEN RESULT.ROLE_TYPE = 20 THEN (SELECT SHOP_CODE FROM SHOP WHERE
+SHOP_ID = (SELECT PARENT_SHOP_ID FROM SHOP WHERE SHOP_ID =
+RESULT.SHOP_ID))
+
+--ELSE (SELECT SHOP_CODE FROM SHOP WHERE SHOP_ID = (SELECT
+PARENT_SHOP_ID FROM SHOP WHERE SHOP_ID = (SELECT PARENT_SHOP_ID FROM
+SHOP WHERE SHOP_ID = RESULT.SHOP_ID)))
+
+--END MIEN
+
+--,CASE
+
+--WHEN RESULT.ROLE_TYPE = 3 THEN (SELECT SHOP_CODE FROM SHOP WHERE
+SHOP_ID = RESULT.SHOP_ID)
+
+--WHEN RESULT.ROLE_TYPE = 20 THEN (SELECT SHOP_CODE FROM SHOP WHERE
+SHOP_ID = (SELECT PARENT_SHOP_ID FROM SHOP WHERE SHOP_ID =
+RESULT.SHOP_ID))
+
+--ELSE (SELECT SHOP_CODE FROM SHOP WHERE SHOP_ID = (SELECT
+PARENT_SHOP_ID FROM SHOP WHERE SHOP_ID = RESULT.SHOP_ID))
+
+--END VUNG
+
+--,CASE
+
+--WHEN RESULT.ROLE_TYPE = 1 OR RESULT.ROLE_TYPE = 2 OR RESULT.ROLE_TYPE
+= 20 THEN (SELECT SHOP_CODE FROM SHOP WHERE SHOP_ID = RESULT.SHOP_ID)
+
+--ELSE NULL
+
+--END MANPP
+
+--,CASE
+
+--WHEN RESULT.ROLE_TYPE = 1 OR RESULT.ROLE_TYPE = 2 OR RESULT.ROLE_TYPE
+= 20 THEN (SELECT SHOP_NAME FROM SHOP WHERE SHOP_ID = RESULT.SHOP_ID)
+
+--ELSE NULL
+
+--END TENNPP
+
+--,(SELECT STAFF_CODE FROM STAFF WHERE STAFF_ID = RESULT.STAFF_ID) MANV
+
+--,(SELECT NAME FROM STAFF WHERE STAFF_ID = RESULT.STAFF_ID) TENNV '||
+
+--                                 strSQL2||', 1 ORDERNUM';
+
+--
+
+--    strSQL:=strSQL||' FROM ('||strSQL1||') RESULT )';
+
+--    strSQL:= strSQL||', RR2 AS( SELECT RR1.MIEN, RR1.VUNG,RR1.MANPP,
+RR1.TENNPP, NULL MANV, NULL TENNV'||strSQL6||', 2 ORDERNUM  FROM
+RR1'||strSQL7||')';
+
+--    strSQL:= strSQL||', RR3 AS ( SELECT * FROM RR1 UNION SELECT * FROM
+RR2) ';
+
+--    strSQL:= strSQL||' SELECT CASE WHEN RR3.MIEN IS NULL THEN
+N''T?ng'' ELSE RR3.MIEN END MIEN, RR3.VUNG, RR3.MANPP, RR3.TENNPP,
+RR3.MANV, RR3.TENNV'||strSQL8
+
+--                   ||' FROM RR3 ORDER BY RR3.VUNG, RR3.MIEN,
+RR3.MANPP, RR3.MANV, RR3.ORDERNUM';
+
+--   strSQL9 := strSQL9 || ')summaryValue from(';
+
+--   strSQL9 := strSQL9 || strSQL;
+
+--   strSQL9 := strSQL9 || ')tmp';
+
+--   strSQL9 := strSQL9 || ' order by tmp.mien, tmp.vung, tmp.manpp,
+tmp.manv';
+
+--   DBMS_OUTPUT.PUT_LINE('SQL = ' || strSQL9);
+
+--  --IF dayWork <> 0 THEN
+
+--    OPEN res FOR strSQL9;
+
+--  --else
+
+--   -- OPEN res FOR select 1 from dual where 1 <> 1 ;
+
+--  --end if;
+
+--    end if;
+
+--
+
+--  END PROC_VT5;
+
+ 
+
+    PROCEDURE PROC_VT5(resData OUT SYS_REFCURSOR , lstShopId STRING,
+staffId STRING, fromDate DATE, toDate DATE) AS
+
+      strSQL CLOB;
+
+      tungayStr VARCHAR(50 byte);
+
+      denngayStr VARCHAR(50 byte);
+
+      in_clause CLOB;
+
+      n number := 0;
+
+      CURSOR c_title
+
+      IS
+
+        with
+
+        dates as(
+
+          SELECT fromDate - 1 + rownum AS d
+
+          FROM all_objects
+
+          WHERE fromDate - 1 + rownum <= toDate
+
+          and fromDate - 1 + rownum <= sysdate
+
+          minus
+
+          select day_off from exception_day
+
+         ),
+
+         p_title as(
+
+            select to_char(d,'dd/mm/yyyy') as title from dates where
+to_char(d,'d') <> 1
+
+         )
+
+            select title
+
+            from p_title;
+
+    BEGIN
+
+          tungayStr := to_char(fromDate,'DD/MM/YYYY');
+
+ 
+
+          if trunc(toDate) > trunc(sysdate)
+
+          then
+
+          denngayStr := to_char(sysdate,'DD/MM/YYYY');
+
+          else
+
+          denngayStr := to_char(toDate,'DD/MM/YYYY');
+
+          end if;
+
+ 
+
+          for x in c_title
+
+          loop
+
+              if n <> 0 then in_clause := in_clause || ', ';
+
+              end if;
+
+              in_clause := in_clause ||  '''' || x.title || '''';
+
+              n := 1;
+
+          end loop;
+
+ 
+
+        strSQL :='
+
+                    WITH
+
+                     p_shop as (
+
+                        select distinct shop_id
+
+                        from shop s
+
+                        start with shop_id IN(SELECT
+regexp_substr('''||lstShopId||''',''[^,]+'', 1, level) FROM dual
+
+                                              CONNECT BY
+regexp_substr('''||lstShopId||''', ''[^,]+'', 1, level) IS NOT NULL)
+
+                        connect by prior shop_id=parent_shop_id
+
+                      )
+
+                     ,
+
+                     dates as(
+
+                      SELECT to_date('''||tungayStr||''',''dd/mm/yyyy'')
+- 1 + rownum AS d
+
+                      FROM all_objects
+
+                      WHERE to_date('''||tungayStr||''',''dd/mm/yyyy'')
+- 1 + rownum <= to_date('''||denngayStr||''',''dd/mm/yyyy'')
+
+                      minus
+
+                      select day_off from exception_day
+
+                     ),
+
+                     lstNgay as(
+
+                        select * from dates where to_char(d,''d'') <> 1
+
+                     )
+
+                     ,
+
+                     lstNVCoKeHoach as (
+
+                        select distinct st.staff_id ,  trunc(ngay.d) as
+create_date
+
+                        from Staff st
+
+                        join visit_plan_log vs on vs.staff_id =
+st.staff_id
+
+                        join lstNgay ngay on ((trunc(ngay.d) + 1 >
+vs.fromdate_log) and (vs.todate_log is null or trunc(ngay.d)  <=
+vs.todate_log))
+
+                        --join customer cs on vs.customer_id =
+cs.customer_id
+
+                        where 1=1
+
+                        --and cs.status = 1
+
+                        and vs.active = 1
+
+                        and st.shop_id in (select shop_id from p_shop)
+
+                        and ('''||staffId||'''   IS NULL or st.staff_id
+= '''||staffId||''')
+
+                        and (st.status = 1 or (st.status = 0 and ngay.d
+< trunc(st.update_time)))
+
+                        and st.role_type in (1,2,3,10,11,20)
+
+                        and ((to_char (ngay.d, ''D'')      = 2 and
+vs.monday                  = 1)
+
+                          or (to_char (ngay.d, ''D'')         = 3 and
+vs.tuesday                 = 1)
+
+                          or (to_char (ngay.d, ''D'')         = 4 and
+vs.wednesday               = 1)
+
+                          or (to_char (ngay.d, ''D'')         = 5 and
+vs.thursday                = 1)
+
+                          or (to_char (ngay.d, ''D'')         = 6 and
+vs.friday                  = 1)
+
+                          or (to_char (ngay.d, ''D'')         = 7 and
+vs.saturday                = 1)
+
+                          or (to_char (ngay.d, ''D'')         = 1 and
+vs.sunday                = 1))
+
+                        and (
+
+                                (
+
+                                 st.role_type in (20)
+
+                                  and (
+
+                                  mod((trunc(ngay.d,''iw'') -
+trunc(vs.start_date,''iw'')) / 7,
+decode(vs.week_sale,''MD'',1,vs.week_sale)) = 0
+
+                                  and (trunc(ngay.d,''iw'') -
+trunc(vs.start_date,''iw'')) >= 0
+
+                                  )
+
+                                )
+
+                                or
+
+                                (
+
+                                 st.role_type in (1, 2, 3, 11, 10)
+
+                                )
+
+                            )
+
+                     )
+
+                     ,
+
+                     lstNVKoBatMay as (
+
+                        select staff_id, create_date
+
+                        from lstNVCoKeHoach
+
+                        minus
+
+                        select distinct spl.staff_id ,
+trunc(spl.create_date) as create_date
+
+                        from staff_position_log spl join staff st on
+st.staff_id = spl.staff_id
+
+                        where spl.create_date >=
+to_date('''||tungayStr||''',''dd/mm/yyyy'') and spl.create_date <
+trunc(to_date('''||denngayStr||''',''dd/mm/yyyy'')) +1
+
+                        and st.shop_id in (select shop_id from p_shop)
+
+                        and ('''||staffId||'''   IS NULL or st.staff_id
+= '''||staffId||''')
+
+                     )
+
+                     ,
+
+                     lstNVBH as (
+
+                         SELECT
+
+                         case when st.role_type = 20 or st.role_type = 3
+then (select shop_code from shop where shop_id = (select parent_shop_id
+from shop where shop_id = st.shop_id))
+
+                        else (SELECT shop_code
+
+                        FROM shop
+
+                        WHERE shop_id =
+
+                          (SELECT parent_shop_id
+
+                          FROM shop
+
+                          WHERE shop_id =
+
+                            (SELECT parent_shop_id FROM shop WHERE
+shop_id = st.shop_id
+
+                            )
+
+                          )
+
+                        )
+
+                        end mamien,
+
+                        (case
+
+                              when st.role_type = 3 then (select
+shop_code from shop where shop_id = st.shop_id)
+
+                              when st.role_type = 20 then (select
+shop_code from shop where shop_id = (select parent_shop_id from shop
+where shop_id = st.shop_id))
+
+                              else (select shop_code from shop where
+shop_id = (select parent_shop_id from shop where shop_id = st.shop_id))
+
+                         end
+
+                        ) mavung,
+
+                        (case
+
+                              when st.role_type = 1 or st.role_type = 2
+or st.role_type = 20 then (select shop_code from shop where shop_id =
+st.shop_id)
+
+                              else null
+
+                        end
+
+                        ) manpp,
+
+                       (case
+
+                              when st.role_type = 1 or st.role_type = 2
+or st.role_type = 20 then (select shop_name from shop where shop_id =
+st.shop_id)
+
+                              else null
+
+                        end
+
+                        ) TenNPP,
+
+                         st.staff_code maNVBH, st.name tenNVBH,
+
+                         to_char(ngay.d,''dd/mm/yyyy'') as ngay,
+
+                          (case
+
+                          when nv1.staff_id is null
+
+                          then null
+
+                          else 1 end ) khongBatMay
+
+                          FROM (select distinct staff_id from
+lstNVKoBatMay) lstkbm
+
+                          join lstNgay ngay on (1=1)
+
+                          join staff st on st.staff_id = lstkbm.staff_id
+
+                          left join lstNVKoBatMay nv1 on nv1.staff_id =
+st.staff_id and nv1.create_date = ngay.d
+
+ 
+
+                          --order by
+mien.shop_code,vung.shop_code,npp.shop_code,st.staff_code,to_char(ngay.d
+,''dd/mm/yyyy'')
+
+                     )
+
+                     ,
+
+                     sumreport as (
+
+                        select mamien, mavung, manpp, tennpp, ngay,
+nvl(sum(khongbatmay),0) khongbatmay
+
+                        from lstnvbh
+
+                        group by rollup ((ngay), (mamien, ngay),
+(mavung, ngay), (manpp, tennpp, ngay))
+
+                        having grouping_id(mamien, mavung, manpp, ngay)
+!= 15
+
+ 
+
+                     )
+
+                     ,
+
+                     RR1 as (
+
+                        select *
+
+                        from lstNVBH
+
+                        union
+
+                        select  mamien, mavung, manpp, tennpp,null
+manvbh,null tennvbh, ngay, khongbatmay
+
+                        from sumreport
+
+                     ),
+
+                     R1 as (
+
+                        select * from (select maMien, maVung, maNPP,
+tenNPP, maNVBH, tenNVBH, ngay, khongBatMay from RR1)
+
+                        pivot (max(khongBatMay) for ngay in
+('||in_clause||'))
+
+                     )
+
+                     select * from R1
+
+                     order by maMien,maVung,maNPP,maNVBH
+
+        ';
+
+        DBMS_OUTPUT.PUT_LINE(strSQL);
+
+        OPEN resData FOR strSQL;
+
+    END PROC_VT5;
+
+ 
+
+PROCEDURE PROC_DS1(res OUT SYS_REFCURSOR , lstShopId NVARCHAR2,
+fromDateStr STRING, toDateStr STRING,productStr NVARCHAR2,catStr
+NVARCHAR2,subCatStr NVARCHAR2) AS
+
+    fromDate date;
+
+    toDate date;
+
+    toDate2 date;
+
+BEGIN
+
+    fromDate := (CASE WHEN to_date(fromDateStr, 'dd/mm/yyyy') <
+TRUNC(SYSDATE) THEN to_date(fromDateStr, 'dd/mm/yyyy') ELSE
+TRUNC(SYSDATE) END);
+
+    toDate := (CASE WHEN to_date(toDateStr, 'dd/mm/yyyy') <
+TRUNC(SYSDATE) THEN to_date(toDateStr, 'dd/mm/yyyy') ELSE TRUNC(SYSDATE)
++ 1 END);
+
+    toDate2 := (CASE WHEN to_date(toDateStr, 'dd/mm/yyyy') =
+TRUNC(SYSDATE) THEN trunc(sysdate) ELSE TRUNC(SYSDATE) + 1 END);
+
+ 
+
+    OPEN res FOR
+
+    WITH
+
+    p_shop AS (
+
+        SELECT distinct shop_id, shop_type
+
+        FROM shop
+
+        CONNECT BY PRIOR shop_id = parent_shop_id
+
+        START WITH shop_id      IN (
+
+            SELECT shop_id
+
+            FROM shop
+
+            WHERE shop_id IN (SELECT regexp_substr(lstShopId,'[^,]+', 1,
+level)
+
+                FROM dual
+
+                CONNECT BY regexp_substr(lstShopId, '[^,]+', 1, level)
+IS NOT NULL
+
+            )
+
+        )
+
+    ),
+
+    lstProduct as (
+
+        select product_id from product where 1=1
+
+          and (productStr is null or upper(product_code) in (SELECT
+upper(regexp_substr(productStr,'[^,]+', 1, level))
+
+                FROM dual
+
+                CONNECT BY regexp_substr(productStr, '[^,]+', 1, level)
+IS NOT NULL
+
+            ))
+
+          and (catStr is null or upper(CATEGORY_CODE) in (SELECT
+upper(regexp_substr(catStr,'[^,]+', 1, level))
+
+                FROM dual
+
+                CONNECT BY regexp_substr(catStr, '[^,]+', 1, level) IS
+NOT NULL
+
+            ))
+
+          and (subCatStr is null or upper(SUBCATEGORY_ID) in (SELECT
+upper(regexp_substr(subCatStr,'[^,]+', 1, level))
+
+                FROM dual
+
+                CONNECT BY regexp_substr(subCatStr, '[^,]+', 1, level)
+IS NOT NULL
+
+            ))
+
+    )
+
+    select
+
+        (CASE WHEN TMP.MAMIEN IS NULL THEN cast('T?ng' as nvarchar2(10))
+
+            ELSE TMP.MAMIEN END) MAMIEN,
+
+        TMP.MAVUNG,
+
+        TMP.MANPP,
+
+        TMP.TENNPP,
+
+        TMP.MANVGS,
+
+        TMP.TENNVGS,
+
+        TMP.MANVBH,
+
+        TMP.TENNVBH,
+
+        TMP.MANGANH,
+
+        TMP.MASP,TMP.SOLUONG,TMP.DOANHSO,TMP.FLAG
+
+    FROM (
+
+        SELECT (case when NPP.shop_code is not null and vung.shop_code
+is not null and mien.shop_code is not null then MIEN.SHOP_CODE
+
+                when npp.shop_code is not null and vung.shop_code is not
+null and mien.shop_code is null then vung.shop_code
+
+                else null end
+
+            ) AS MAMIEN,
+
+            VUNG.SHOP_CODE AS MAVUNG,
+
+            NPP.SHOP_CODE AS MANPP,
+
+            NPP.SHOP_NAME AS TENNPP,
+
+            MANVGS,
+
+            TENNVGS,
+
+            MANVBH,
+
+            TENNVBH,
+
+            MANGANH,
+
+            MASP,
+
+            SUM(SOLUONG) AS SOLUONG,
+
+            SUM(DSTTTHANGNAY) AS DOANHSO,
+
+            GROUPING_ID(
+
+                MIEN.SHOP_CODE, VUNG.SHOP_CODE, NPP.SHOP_CODE,
+NPP.SHOP_NAME,
+
+                MANVGS, TENNVGS, MANVBH, TENNVBH, MANGANH, MASP ) AS
+FLAG
+
+        FROM (
+
+            SELECT  DOANSOTHANGNAY.SHOP_ID, STGS.STAFF_CODE AS MANVGS,
+STGS.NAME AS TENNVGS, ST.STAFF_CODE AS MANVBH,
+
+                ST.NAME AS TENNVBH, P.CATEGORY_CODE AS MANGANH,
+PRODUCT_CODE MASP, DOANSOTHANGNAY.SOLUONG,
+
+                DOANSOTHANGNAY.DSTTTHANGNAY
+
+            FROM (
+
+                SELECT (case when DS1.SHOP_ID is not null then
+DS1.SHOP_ID else DS2.SHOP_ID end) AS SHOP_ID,
+
+                    (case when DS1.STAFF_ID is not null then
+DS1.STAFF_ID else DS2.STAFF_ID end) AS STAFF_ID,
+
+                    (case when DS1.PRODUCT_ID is not null then
+DS1.PRODUCT_ID else DS2.PRODUCT_ID end) AS PRODUCT_ID,
+
+                    (NVL(DS1.SOLUONG,0)  +  NVL(DS2.SOLUONG,0)) as
+SOLUONG  ,
+
+                    (NVL(DS1.DSTTTHANGNAY,0)  +
+NVL(DS2.DSTTTHANGNAY,0)) as DSTTTHANGNAY
+
+                FROM (
+
+                    SELECT
+
+                        (CASE WHEN SF.SHOP_ID IS NOT NULL THEN
+SF.SHOP_ID
+
+                            ELSE S.SHOP_ID END) as SHOP_ID,
+
+                        S.STAFF_ID,
+
+                        D.PRODUCT_ID,
+
+                        SUM(D.QUANTITY * DECODE(S.ORDER_TYPE, 'IN', 1,
+'PO', 1, 'CM', -1, 'CO', -1, 1)) AS SOLUONG,
+
+                        SUM(D.AMOUNT * DECODE(S.ORDER_TYPE, 'IN', 1,
+'PO', 1, 'CM', -1, 'CO', -1, 1)) AS DSTTTHANGNAY
+
+                    FROM SALES_ORDER S
+
+                    JOIN SALES_ORDER_DETAIL D ON (S.SALE_ORDER_ID =
+D.SALE_ORDER_ID)
+
+                    LEFT JOIN STAFF SF ON SF.STAFF_ID = S.STAFF_ID
+
+                    WHERE S.ORDER_DATE >= fromDate
+
+                        AND  S.ORDER_DATE < toDate + 1
+
+                        AND D.ORDER_DATE >= fromDate
+
+                        AND  D.ORDER_DATE < toDate + 1
+
+                        AND S.STATE = 2
+
+                        AND D.IS_FREE_ITEM = 0
+
+                        AND EXISTS (
+
+                            SELECT 1 FROM P_SHOP
+
+                            WHERE (CASE WHEN SF.SHOP_ID IS NOT NULL THEN
+SF.SHOP_ID
+
+                                    ELSE S.SHOP_ID END) = SHOP_ID
+
+                        )
+
+                    GROUP BY (CASE WHEN SF.SHOP_ID IS NOT NULL THEN
+SF.SHOP_ID
+
+                        ELSE S.SHOP_ID END),S.STAFF_ID, D.PRODUCT_ID
+
+                )  DS1
+
+                FULL JOIN (
+
+                    SELECT
+
+                        (CASE WHEN SF.SHOP_ID IS NOT NULL THEN
+SF.SHOP_ID
+
+                            ELSE S.SHOP_ID END) as SHOP_ID,
+
+                        S.STAFF_ID,
+
+                        D.PRODUCT_ID,
+
+                        SUM(D.QUANTITY) AS SOLUONG,
+
+                        SUM(D.AMOUNT) AS DSTTTHANGNAY
+
+                    FROM SALES_ORDER S
+
+                    JOIN SALES_ORDER_DETAIL D ON (S.SALE_ORDER_ID =
+D.SALE_ORDER_ID)
+
+                    LEFT JOIN STAFF SF ON SF.STAFF_ID = S.STAFF_ID
+
+                    WHERE S.ORDER_DATE >= toDate2
+
+                        AND D.ORDER_DATE >= toDate2
+
+                        AND S.STATE = 1
+
+                        AND S.IS_SEND = 1
+
+                        AND D.IS_FREE_ITEM = 0
+
+                        AND EXISTS (
+
+                            SELECT 1 FROM P_SHOP
+
+                            WHERE (CASE WHEN SF.SHOP_ID IS NOT NULL THEN
+SF.SHOP_ID
+
+                                    ELSE S.SHOP_ID END) = SHOP_ID
+
+                        )
+
+                    GROUP BY (CASE WHEN SF.SHOP_ID IS NOT NULL THEN
+SF.SHOP_ID
+
+                        ELSE S.SHOP_ID END),S.STAFF_ID, D.PRODUCT_ID
+
+                )  DS2 ON DS1.SHOP_ID = DS2.SHOP_ID
+
+                    AND DS1.STAFF_ID =  DS2.STAFF_ID AND DS1.PRODUCT_ID
+= DS2.PRODUCT_ID
+
+            ) DOANSOTHANGNAY
+
+            JOIN PRODUCT  P ON P.PRODUCT_ID = DOANSOTHANGNAY.PRODUCT_ID
+
+            LEFT JOIN STAFF ST ON DOANSOTHANGNAY.STAFF_ID = ST.STAFF_ID
+
+            LEFT JOIN STAFF STGS ON ((ST.STAFF_OWNER_ID = STGS.STAFF_ID
+AND ST.ROLE_TYPE = 1)
+
+                OR (ST.STAFF_ID = STGS.STAFF_ID AND ST.ROLE_TYPE = 10)
+
+                OR (ST.STAFF_ID = STGS.STAFF_ID AND ST.ROLE_TYPE = 20))
+
+            WHERE 
+
+--            DOANSOTHANGNAY.DSTTTHANGNAY > 0
+
+            1 = 1
+
+            and ((productStr is null and catStr is null and subCatStr is
+null)
+
+                  or p.product_id in (select product_id from
+lstProduct))
+
+        ) RESULT
+
+        JOIN SHOP NPP ON (RESULT.SHOP_ID = NPP.SHOP_ID)
+
+        LEFT JOIN SHOP VUNG ON (NPP.PARENT_SHOP_ID = VUNG.SHOP_ID)
+
+        LEFT JOIN SHOP MIEN ON (VUNG.PARENT_SHOP_ID = MIEN.SHOP_ID)
+
+        GROUP BY ROLLUP(
+
+            MIEN.SHOP_CODE, VUNG.SHOP_CODE, NPP.SHOP_CODE,
+NPP.SHOP_NAME,
+
+            MANVGS, TENNVGS,MANVBH, TENNVBH,
+
+            MANGANH, MASP
+
+        )
+
+        HAVING GROUPING_ID(
+
+            MIEN.SHOP_CODE, VUNG.SHOP_CODE, NPP.SHOP_CODE,
+NPP.SHOP_NAME,
+
+            MANVGS, TENNVGS, MANVBH, TENNVBH,
+
+            MANGANH, MASP ) IN (0,3,127,255,511,1023)
+
+        ORDER BY MIEN.SHOP_CODE, VUNG.SHOP_CODE, NPP.SHOP_CODE,
+NPP.SHOP_NAME,
+
+            MANVGS, TENNVGS, MANVBH, TENNVBH, MANGANH, MASP
+
+    ) TMP;
+
+ 
+
+END PROC_DS1;
+
+ 
+
+ 
+
+PROCEDURE PROC_DS2(res OUT SYS_REFCURSOR , lstShopId NVARCHAR2,
+fromDateStr STRING, toDateStr STRING, productStr NVARCHAR2, catStr
+NVARCHAR2, subCatStr NVARCHAR2) AS
+
+    fromDate date;
+
+    toDate date;
+
+    toDate2 date;
+
+BEGIN
+
+    fromDate := (CASE WHEN to_date(fromDateStr, 'dd/mm/yyyy') <
+TRUNC(SYSDATE) THEN to_date(fromDateStr, 'dd/mm/yyyy') ELSE
+TRUNC(SYSDATE) END);
+
+    toDate := (CASE WHEN to_date(toDateStr, 'dd/mm/yyyy') <
+TRUNC(SYSDATE) THEN to_date(toDateStr, 'dd/mm/yyyy') ELSE TRUNC(SYSDATE)
+- 1 END);
+
+    toDate2 := (CASE WHEN to_date(toDateStr, 'dd/mm/yyyy') =
+TRUNC(SYSDATE) THEN trunc(sysdate) ELSE TRUNC(SYSDATE) + 1 END);
+
+ 
+
+    OPEN res FOR
+
+    WITH p_shop AS (
+
+        SELECT distinct shop_id, shop_type
+
+        FROM shop
+
+        CONNECT BY PRIOR shop_id = parent_shop_id
+
+        START WITH shop_id IN (
+
+            SELECT shop_id
+
+            FROM shop
+
+            WHERE shop_id IN (
+
+                SELECT regexp_substr(lstShopId,'[^,]+', 1, level)
+
+                FROM dual
+
+                CONNECT BY regexp_substr(lstShopId, '[^,]+', 1, level)
+IS NOT NULL
+
+            )
+
+        )
+
+    ),
+
+    lstProduct as (
+
+        select product_id from product where 1=1
+
+          and (productStr is null or upper(product_code) in (SELECT
+upper(regexp_substr(productStr,'[^,]+', 1, level))
+
+                FROM dual
+
+                CONNECT BY regexp_substr(productStr, '[^,]+', 1, level)
+IS NOT NULL
+
+            ))
+
+          and (catStr is null or upper(CATEGORY_CODE) in (SELECT
+upper(regexp_substr(catStr,'[^,]+', 1, level))
+
+                FROM dual
+
+                CONNECT BY regexp_substr(catStr, '[^,]+', 1, level) IS
+NOT NULL
+
+            ))
+
+          and (subCatStr is null or upper(SUBCATEGORY_ID) in (SELECT
+upper(regexp_substr(subCatStr,'[^,]+', 1, level))
+
+                FROM dual
+
+                CONNECT BY regexp_substr(subCatStr, '[^,]+', 1, level)
+IS NOT NULL
+
+            ))
+
+    )
+
+    SELECT
+
+        (case when npp.shop_code is not null and vung.shop_code is not
+null and mien.shop_code is not null then MIEN.SHOP_CODE
+
+            when npp.shop_code is not null and vung.shop_code is not
+null and mien.shop_code is null then vung.shop_code
+
+            else null
+
+        end) AS maMien,
+
+        VUNG.SHOP_CODE AS maVung,
+
+        NPP.SHOP_CODE AS maNPP,
+
+        NPP.SHOP_NAME AS tenNPP,
+
+        MANVGS as maNVGS,
+
+        TENNVGS as tenNVGS,
+
+       MANVBH as maNVBH,
+
+        TENNVBH as tenNVBH,
+
+        MAKH as maKH,
+
+        TENKH as tenKH,
+
+        BILLTO as billTo,
+
+        DIACHIKH as diaChiKH,
+
+        MANGANH as maNganh,
+
+        MASP as maSP,
+
+        TENSP as tenSP,
+
+        SUM(SOLUONG) AS soLuong,
+
+        SUM(DSTTTHANGNAY) AS doanhSo,
+
+        GROUPING_ID(
+
+            MIEN.SHOP_CODE, VUNG.SHOP_CODE, NPP.SHOP_CODE,
+NPP.SHOP_NAME,
+
+            MANVGS, TENNVGS, MANVBH, TENNVBH,
+
+            MAKH, TENKH, BILLTO, DIACHIKH, MANGANH,
+
+            MASP, TENSP ) AS FLAG
+
+    FROM (
+
+        SELECT  DOANSOTHANGNAY.SHOP_ID, STGS.STAFF_CODE AS MANVGS,
+STGS.NAME AS TENNVGS, ST.STAFF_CODE AS MANVBH,
+
+            ST.NAME AS TENNVBH,c.bill_to as BILLTO,
+
+            (case when st.role_type = 20 or st.role_type is null then
+c.customer_code else SUBSTR(C.CUSTOMER_CODE,5) ||
+SUBSTR(C.CUSTOMER_CODE,0,3) end) AS MAKH,
+
+            C.CUSTOMER_NAME AS TENKH, C.HOUSENUMBER || ' ' || C.STREET
+AS DIACHIKH,
+
+            P.CATEGORY_CODE AS MANGANH, PRODUCT_CODE MASP, PRODUCT_NAME
+TENSP, nvl(DOANSOTHANGNAY.SOLUONG, 0) as SOLUONG,
+
+            nvl(DOANSOTHANGNAY.DSTTTHANGNAY, 0) as DSTTTHANGNAY
+
+        FROM (
+
+            SELECT
+
+                (case when DS1.SHOP_ID is not null then DS1.SHOP_ID
+
+                    else DS2.SHOP_ID
+
+                end) AS SHOP_ID,
+
+                (case when DS1.STAFF_ID is not null then DS1.STAFF_ID
+
+                    else DS2.STAFF_ID
+
+                end) AS STAFF_ID,
+
+                (case when DS1.CUSTOMER_ID is not null then
+DS1.CUSTOMER_ID
+
+                    else DS2.CUSTOMER_ID
+
+                end) AS CUSTOMER_ID,
+
+                (case when DS1.PRODUCT_ID is not null then
+DS1.PRODUCT_ID
+
+                    else DS2.PRODUCT_ID
+
+                end) AS PRODUCT_ID,
+
+                (NVL(DS1.SOLUONG,0)  +  NVL(DS2.SOLUONG,0)) as SOLUONG
+,
+
+                (NVL(DS1.DSTTTHANGNAY,0)  +  NVL(DS2.DSTTTHANGNAY,0)) as
+DSTTTHANGNAY
+
+            FROM(
+
+                SELECT
+
+                    (CASE WHEN SF.SHOP_ID IS NOT NULL THEN SF.SHOP_ID
+
+                        ELSE S.SHOP_ID END) AS SHOP_ID,
+
+                    S.STAFF_ID, S.CUSTOMER_ID, D.PRODUCT_ID,
+
+                    SUM(D.QUANTITY * DECODE(S.ORDER_TYPE, 'IN', 1, 'PO',
+1, 'CM', -1, 'CO', -1, 1)) AS SOLUONG,
+
+                    SUM(D.AMOUNT * DECODE(S.ORDER_TYPE, 'IN', 1, 'PO',
+1, 'CM', -1, 'CO', -1, 1)) AS DSTTTHANGNAY
+
+                FROM SALES_ORDER S
+
+                INNER JOIN SALES_ORDER_DETAIL D ON (S.SALE_ORDER_ID =
+D.SALE_ORDER_ID)
+
+                LEFT JOIN STAFF SF ON SF.STAFF_ID = S.STAFF_ID
+
+                WHERE S.STATE = 2
+
+                    AND S.ORDER_DATE >= fromDate
+
+                    AND  S.ORDER_DATE < toDate + 1
+
+                    AND D.ORDER_DATE >= fromDate
+
+                    AND  D.ORDER_DATE < toDate + 1
+
+                    AND D.IS_FREE_ITEM = 0
+
+                    AND EXISTS (
+
+                        SELECT 1 FROM P_SHOP
+
+                        WHERE (CASE WHEN SF.SHOP_ID IS NOT NULL THEN
+SF.SHOP_ID
+
+                                ELSE S.SHOP_ID END) = SHOP_ID
+
+                    )
+
+                GROUP BY (CASE WHEN SF.SHOP_ID IS NOT NULL THEN
+SF.SHOP_ID
+
+                    ELSE S.SHOP_ID END),S.STAFF_ID, S.CUSTOMER_ID,
+D.PRODUCT_ID
+
+            )  DS1
+
+            FULL JOIN (
+
+                SELECT
+
+                    (CASE WHEN SF.SHOP_ID IS NOT NULL THEN SF.SHOP_ID
+
+                        ELSE S.SHOP_ID END) AS SHOP_ID,
+
+                    S.STAFF_ID, S.CUSTOMER_ID, D.PRODUCT_ID,
+
+                    SUM(D.QUANTITY) AS SOLUONG,
+
+                    SUM(D.AMOUNT) AS DSTTTHANGNAY
+
+                FROM SALES_ORDER S
+
+                INNER JOIN SALES_ORDER_DETAIL D ON S.SALE_ORDER_ID =
+D.SALE_ORDER_ID
+
+                LEFT JOIN STAFF SF ON SF.STAFF_ID = S.STAFF_ID
+
+                WHERE S.STATE = 1
+
+                    AND S.IS_SEND = 1
+
+                    AND S.ORDER_DATE >= toDate2
+
+                    AND D.ORDER_DATE >= toDate2
+
+                    AND D.IS_FREE_ITEM = 0
+
+                    AND EXISTS (
+
+                        SELECT 1 FROM P_SHOP
+
+                        WHERE (CASE WHEN SF.SHOP_ID IS NOT NULL THEN
+SF.SHOP_ID
+
+                                ELSE S.SHOP_ID END) = SHOP_ID
+
+                    )
+
+                GROUP BY (CASE WHEN SF.SHOP_ID IS NOT NULL THEN
+SF.SHOP_ID
+
+                    ELSE S.SHOP_ID END),S.STAFF_ID,S.CUSTOMER_ID,
+D.PRODUCT_ID
+
+            )  DS2 ON DS1.SHOP_ID = DS2.SHOP_ID AND DS1.STAFF_ID =
+DS2.STAFF_ID
+
+                    AND DS1.PRODUCT_ID = DS2.PRODUCT_ID AND
+DS1.CUSTOMER_ID = DS2.CUSTOMER_ID
+
+        ) DOANSOTHANGNAY
+
+        JOIN PRODUCT P ON P.PRODUCT_ID = DOANSOTHANGNAY.PRODUCT_ID
+
+        JOIN CUSTOMER C ON DOANSOTHANGNAY.CUSTOMER_ID =  C.CUSTOMER_ID
+
+        LEFT JOIN STAFF ST ON DOANSOTHANGNAY.STAFF_ID = ST.STAFF_ID
+
+        LEFT JOIN STAFF STGS ON ((ST.STAFF_OWNER_ID = STGS.STAFF_ID AND
+ST.ROLE_TYPE = 1)
+
+                OR (ST.STAFF_ID = STGS.STAFF_ID AND ST.ROLE_TYPE = 10)
+
+                OR (ST.STAFF_ID = STGS.STAFF_ID AND ST.ROLE_TYPE = 20))
+
+        WHERE 
+
+--        DOANSOTHANGNAY.DSTTTHANGNAY > 0
+
+        1 = 1
+
+        and ((productStr is null and catStr is null and subCatStr is
+null)
+
+                  or p.product_id in (select product_id from
+lstProduct))
+
+    ) RESULT
+
+    INNER JOIN SHOP NPP ON (RESULT.SHOP_ID = NPP.SHOP_ID)
+
+    LEFT JOIN SHOP VUNG ON (NPP.PARENT_SHOP_ID = VUNG.SHOP_ID)
+
+    LEFT JOIN SHOP MIEN ON (VUNG.PARENT_SHOP_ID = MIEN.SHOP_ID)
+
+    GROUP BY ROLLUP(
+
+        MIEN.SHOP_CODE, VUNG.SHOP_CODE, NPP.SHOP_CODE, NPP.SHOP_NAME,
+
+        MANVGS, TENNVGS, MANVBH, TENNVBH,
+
+        MAKH, TENKH, BILLTO, DIACHIKH, MANGANH,
+
+        MASP, TENSP )
+
+    HAVING GROUPING_ID(
+
+        MIEN.SHOP_CODE, VUNG.SHOP_CODE, NPP.SHOP_CODE, NPP.SHOP_NAME,
+
+        MANVGS, TENNVGS, MANVBH, TENNVBH,
+
+        MAKH, TENKH, BILLTO, DIACHIKH, MANGANH,
+
+        MASP, TENSP ) IN (0, 15, 63, 2047, 4095, 8191, 16383)
+
+    ORDER BY
+
+        MIEN.SHOP_CODE, VUNG.SHOP_CODE, NPP.SHOP_CODE, NPP.SHOP_NAME,
+
+        MANVGS, TENNVGS, MANVBH, TENNVBH,
+
+        MAKH, TENKH, BILLTO, DIACHIKH, MANGANH,
+
+        MASP, TENSP;
+
+ 
+
+END PROC_DS2;
+
+ 
+
+PROCEDURE PROC_DS3(res OUT SYS_REFCURSOR , lstShopId nvarchar2, gsnppId
+NUMBER, staffId NUMBER, rptDate DATE, fromHour NUMBER, fromMinute
+NUMBER, toHour NUMBER, toMinute NUMBER, sprTime NUMBER) as
+
+  fromDate  DATE;
+
+  toDate    DATE;
+
+  numTime   NUMBER;
+
+  begin
+
+    /* TODO implementation required */
+
+    fromDate := TRUNC(rptDate) + fromHour / 24 + fromMinute / (60 * 24);
+
+    toDate := TRUNC(rptDate) + toHour / 24 + toMinute / (60 * 24);
+
+    SELECT COUNT(1)
+
+    INTO numTime
+
+    FROM dual
+
+      CONNECT BY fromDate + (level - 1) * sprTime / (24 * 60) < toDate;
+
+    OPEN res FOR
+
+      SELECT case when sh3.shop_code is null and sh2.shop_code is null
+and sh1.shop_code is null then cast('Tổng' as nvarchar2(10))
+
+          when sh3.shop_code is null and sh2.shop_code is not null and
+sh1.shop_code is not null then sh2.shop_code
+
+          else sh3.shop_code 
+
+          end  AS maMien,
+
+        sh2.shop_code               AS maVung,
+
+        sh1.shop_code               AS maNPP,
+
+        sh1.shop_name               AS tenNPP,
+
+        s2.staff_code               AS maGSNPP,
+
+        s2.name                     AS tenGSNPP,
+
+        s1.staff_code               AS maNVBH,
+
+        s1.name                     AS tenNVBH,
+
+        CASE WHEN GROUPING_ID( sh3.shop_code, sh2.shop_code,
+sh1.shop_code, sh1.shop_name, s2.staff_code, s2.name, s1.staff_code,
+s1.name, tb1.staff_id, tb1.start_time, tb1.end_time ) = 0 THEN
+
+          SUM(tb1.day_cust_plan)
+
+        ELSE
+
+          SUM(tb1.day_cust_plan) / numTime
+
+        END AS soKHKH,
+
+        SUM(NVL(tb3.day_cust, 0))   AS soKHTH,
+
+        SUM(NVL(tb2.num_order, 0))  AS soDH,
+
+        SUM(NVL(tb2.day_amount, 0)) AS dsTH,
+
+        CASE WHEN GROUPING_ID( sh3.shop_code, sh2.shop_code,
+sh1.shop_code, sh1.shop_name, s2.staff_code, s2.name, s1.staff_code,
+s1.name, tb1.staff_id, tb1.start_time, tb1.end_time ) = 0 THEN
+
+          to_char(tb1.start_time, 'HH24') || 'h' ||
+to_char(tb1.start_time, 'MI')
+
+          || ' - ' || to_char(tb1.end_time, 'HH24') || 'h' ||
+to_char(tb1.end_time, 'MI')
+
+        ELSE
+
+          NULL
+
+        END AS tg
+
+      FROM
+
+        (SELECT t.start_time            AS start_time,
+
+          t.end_time                    AS end_time,
+
+          NVL(s1.staff_id, s2.staff_id) AS staff_id,
+
+          NVL(s2.day_cust_plan, 0)      AS day_cust_plan
+
+        FROM
+
+          (SELECT s.staff_id staff_id
+
+          FROM staff s
+
+          WHERE (s.role_type = 1 or s.role_type = 20)
+
+          AND EXISTS
+
+            (SELECT 1
+
+            FROM action_log al
+
+            WHERE al.staff_id  = s.staff_id
+
+            AND al.start_time >= TRUNC(fromDate)
+
+            AND al.start_time  < TRUNC(fromDate) + 1
+
+            )
+
+          ) s1
+
+        FULL JOIN
+
+          (SELECT vp.staff_id staff_id,
+
+            COUNT(DISTINCT vp.customer_id) day_cust_plan
+
+          FROM visit_plan vp,
+
+            customer cs
+
+          WHERE vp.customer_id             = cs.customer_id
+
+          AND cs.status                    = 1
+
+          AND TRUNC (start_date)          <= fromDate
+
+          AND (end_date                   IS NULL
+
+          OR end_date                     >= TRUNC (fromDate))
+
+          AND active                       = 1
+
+          AND ( (monday                    = 1
+
+          AND TO_CHAR (fromDate, 'D') = 2)
+
+          OR (tuesday                      = 1
+
+          AND TO_CHAR (fromDate, 'D') = 3)
+
+          OR (wednesday                    = 1
+
+          AND TO_CHAR (fromDate, 'D') = 4)
+
+          OR (thursday                     = 1
+
+          AND TO_CHAR (fromDate, 'D') = 5)
+
+          OR (friday                       = 1
+
+          AND TO_CHAR (fromDate, 'D') = 6)
+
+          OR (saturday                     = 1
+
+          AND TO_CHAR (fromDate, 'D') = 7))
+
+          GROUP BY vp.staff_id
+
+          ) s2
+
+        ON s1.staff_id = s2.staff_id
+
+        JOIN
+
+          (SELECT fromDate + (level - 1) * sprTime / (24 * 60) AS
+start_time,
+
+            fromDate       + (level) * sprTime / (24 * 60)     AS
+end_time
+
+          FROM dual
+
+            CONNECT BY fromDate + (level - 1) * sprTime / (24 * 60) <
+toDate
+
+          ) t
+
+        ON 1 = 1
+
+        ) tb1
+
+      LEFT JOIN
+
+        (SELECT t.start_time             AS start_time,
+
+          t.end_time                     AS end_time,
+
+          al.staff_id                    AS staff_id,
+
+          COUNT(DISTINCT al.customer_id) AS num_order,
+
+          SUM(
+
+          CASE
+
+            WHEN so.state = 1
+
+            THEN so.amount * DECODE(so.order_type, 'PO', 1, 'CM', -1,
+'SO', 1, 'CO', -1, 1)
+
+            ELSE so.amount * DECODE(so.order_type, 'IN', 1, 'CM', -1,
+'SO', 1, 'CO', -1, 1)
+
+          END) AS day_amount
+
+        FROM
+
+          (SELECT fromDate + (level - 1) * sprTime / (24 * 60) AS
+start_time,
+
+            fromDate       + (level) * sprTime / (24 * 60)     AS
+end_time
+
+          FROM dual
+
+            CONNECT BY fromDate + (level - 1) * sprTime / (24 * 60) <
+toDate
+
+          ) t
+
+        JOIN action_log al
+
+        ON al.start_time  >= t.start_time
+
+        AND al.start_time  < t.end_time
+
+        AND al.object_type = 4
+
+        AND NOT EXISTS (
+
+          SELECT 1
+
+          FROM action_log al_tmp
+
+          WHERE al_tmp.customer_id = al.customer_id
+
+          AND al_tmp.staff_id = al.staff_id
+
+          AND al_tmp.object_type = 4
+
+          AND al_tmp.start_time >= TRUNC(al.start_time)
+
+          AND al_tmp.start_time  < al.start_time
+
+        )
+
+        JOIN sales_order so
+
+        ON so.order_date  >= TRUNC(fromDate)
+
+        AND so.order_date  < TRUNC(fromDate) + 1
+
+        AND ((so.state     = 2
+
+        AND so.order_date  < TRUNC(SYSDATE))
+
+        OR (so.state       = 1
+
+        AND so.is_send     = 1
+
+        AND so.order_date >= TRUNC(SYSDATE)))
+
+        AND so.customer_id = al.customer_id
+
+        AND so.staff_id = al.staff_id
+
+        GROUP BY t.start_time,
+
+          t.end_time,
+
+          al.staff_id
+
+        ) tb2 ON tb1.start_time = tb2.start_time
+
+      AND tb1.staff_id          = tb2.staff_id
+
+      LEFT JOIN
+
+        (SELECT t.start_time             AS start_time,
+
+          t.end_time                     AS end_time,
+
+          al.staff_id                    AS staff_id,
+
+          COUNT(DISTINCT al.customer_id) AS day_cust
+
+        FROM
+
+          (SELECT fromDate + (level - 1) * sprTime / (24 * 60) AS
+start_time,
+
+            fromDate       + (level) * sprTime / (24 * 60)     AS
+end_time
+
+          FROM dual
+
+            CONNECT BY fromDate + (level - 1) * sprTime / (24 * 60) <
+toDate
+
+          ) t
+
+        JOIN action_log al
+
+        ON al.start_time   >= t.start_time
+
+        AND al.start_time   < t.end_time
+
+        AND al.object_type IN (0, 1)
+
+        GROUP BY t.start_time,
+
+          t.end_time,
+
+          al.staff_id
+
+        ) tb3 ON tb1.start_time = tb3.start_time
+
+      AND tb1.staff_id          = tb3.staff_id
+
+      JOIN staff s1
+
+      ON s1.staff_id = tb1.staff_id
+
+      AND s1.status = 1
+
+      JOIN staff s2
+
+      ON s2.staff_id = s1.staff_owner_id
+
+      AND s2.status = 1
+
+      INNER JOIN shop sh1
+
+      ON sh1.shop_id = s1.shop_id
+
+      LEFT JOIN shop sh2
+
+      ON sh2.shop_id = sh1.parent_shop_id
+
+      LEFT JOIN shop sh3
+
+      ON sh3.shop_id   = sh2.parent_shop_id
+
+      WHERE sh1.shop_id IN (
+
+        SELECT shop_id
+
+          FROM shop
+
+            CONNECT BY PRIOR shop_id = parent_shop_id
+
+            START WITH shop_id      IN
+
+            (SELECT shop_id
+
+            FROM shop
+
+            WHERE shop_id IN
+
+              (SELECT regexp_substr(lstShopId,'[^,]+', 1, level)
+
+              FROM dual
+
+                CONNECT BY regexp_substr(lstShopId, '[^,]+', 1, level)
+IS NOT NULL
+
+              )
+
+            )
+
+          GROUP BY shop_id
+
+      )
+
+      AND (gsnppId           IS NULL
+
+      OR s2.staff_id = gsnppId)
+
+      AND (staffId            IS NULL
+
+      OR s1.staff_id = staffId)
+
+      GROUP BY ROLLUP(sh3.shop_code, sh2.shop_code, sh1.shop_code,
+sh1.shop_name, s2.staff_code, s2.name, s1.staff_code, s1.name,
+tb1.staff_id, tb1.start_time, tb1.end_time)
+
+      HAVING GROUPING_ID( sh3.shop_code, sh2.shop_code, sh1.shop_code,
+sh1.shop_name, s2.staff_code, s2.name, s1.staff_code, s1.name,
+tb1.staff_id, tb1.start_time, tb1.end_time ) NOT IN (1, 3, 15, 63, 255)
+
+      ORDER BY sh3.shop_code,
+
+        sh2.shop_code,
+
+        sh1.shop_code,
+
+        sh1.shop_name,
+
+        s2.staff_code,
+
+        s1.staff_code,
+
+        tb1.staff_id,
+
+        tb1.start_time;
+
+  end PROC_DS3;
+
+  
+
+  PROCEDURE PROC_VT_13(res OUT SYS_REFCURSOR ,lstShopId NVARCHAR2,
+lstStaffCode NVARCHAR2, fromDate DATE, toDate DATE)
+
+as
+
+BEGIN
+
+    OPEN res FOR
+
+    with lstStaff as (
+
+      select st.staff_id,st.staff_code,st.name,st.shop_id
+
+      from staff st where st.shop_id in (
+
+              SELECT shop_id FROM shop  CONNECT BY PRIOR shop_id =
+parent_shop_id
+
+                START WITH shop_id IN
+
+                (SELECT shop_id FROM shop WHERE shop_id IN
+
+                  (SELECT regexp_substr(lstShopId,'[^,]+', 1, level)
+
+                    FROM dual
+
+                    CONNECT BY regexp_substr(lstShopId, '[^,]+', 1,
+level) IS NOT NULL
+
+                  )))
+
+        and (lstStaffCode is null or st.staff_code in (SELECT
+upper(regexp_substr(lstStaffCode,'[^,]+', 1, level))
+
+                    FROM dual
+
+                    CONNECT BY regexp_substr(lstStaffCode, '[^,]+', 1,
+level) IS NOT NULL
+
+                  ))
+
+    )
+
+    select sf.staff_id as staffId, sf.staff_code as staffCode, sf.name
+as staffName,
+
+        round(sum(d.distance),0) as distance,
+
+        to_char(trunc(d.create_date),'dd/MM/yyyy') as createDate,
+
+        npp.shop_code as maNPP,npp.shop_name as tenNPP,
+
+        (case when mien.shop_code is null then npp.shop_code else
+vung.shop_code end) as vung,
+
+        (case when mien.shop_code is null then npp.shop_code else
+mien.shop_code end) as mien
+
+    from (
+
+        select splg.staff_id, splg.create_date, splg.lat, splg.lng,
+
+            lag(lat) over (partition by staff_id,trunc(create_date)
+order by create_date) as last_lat,
+
+            lag(lng) over (partition by staff_id,trunc(create_date)
+order by create_date) as last_lng,
+
+            (case when nvl(splg.lat, -1) = -1 or nvl(splg.lng, -1) = -1
+
+                    or nvl(lag(lat) over (partition by
+staff_id,trunc(create_date) order by create_date), -1) = -1 or
+nvl(lag(lng) over (partition by staff_id,trunc(create_date) order by
+create_date), -1) = -1
+
+                then 0
+
+                else sdo_geom.sdo_distance (
+
+                        sdo_geometry (2001,8307, sdo_point_type
+(splg.lng, splg.lat, NULL), NULL, NULL),
+
+                        sdo_geometry (2001, 8307, sdo_point_type
+(lag(lng) over (partition by staff_id,trunc(create_date) order by
+create_date), lag(lat) over (partition by staff_id,trunc(create_date)
+order by create_date), NULL), NULL, NULL), 0.0001, 'unit=m'
+
+                    )
+
+            end) as distance
+
+        from staff_position_log splg
+
+        where splg.create_date >= trunc(fromDate) and
+splg.create_date<trunc(toDate)+1
+
+        order by splg.staff_id, splg.create_date
+
+    ) d
+
+    join lstStaff sf on d.staff_id = sf.staff_id
+
+    join shop npp on sf.shop_id=npp.shop_id
+
+    left join shop vung on npp.parent_shop_id=vung.shop_id
+
+    left join shop mien on vung.parent_shop_id=mien.shop_id
+
+    group by
+mien.shop_code,vung.shop_code,(npp.shop_code,npp.shop_name),(sf.staff_id
+, sf.staff_code, sf.name),trunc(d.create_date)
+
+    order by
+mien.shop_code,vung.shop_code,npp.shop_code,sf.staff_code,trunc(d.create
+_date);
+
+ 
+
+END PROC_VT_13;
+
+ 
+
+PROCEDURE PROC_VT_14(res OUT SYS_REFCURSOR ,lstShopId NVARCHAR2,
+fromDate DATE, toDate DATE)
+
+as
+
+BEGIN
+
+    OPEN res FOR
+
+    with lstShop as(
+
+      select shop_id from shop start with shop_id in
+
+                  (SELECT regexp_substr(lstShopId,'[^,]+', 1, level)
+FROM dual
+
+                    CONNECT BY regexp_substr(lstShopId, '[^,]+', 1,
+level) IS NOT NULL)
+
+      connect by prior shop_id=parent_shop_id
+
+    )
+
+    select pp.id,pp.cat,pp.cat_name catName,pp.product_descr
+productDescr,pp.buy_descr buyDescr,
+
+    pp.free_descr freeDescr, pp.free_product_descr freeProductDescr,
+pp.object_descr objectDescr,
+
+    to_char(pp.from_date,'dd/MM/yyyy') fromDateStr,
+to_char(pp.to_date,'dd/MM/yyyy') toDateStr,
+
+    (select customer_code from customer where
+customer_id=ppr.customer_id) customerCode,
+
+    (select customer_name from customer where
+customer_id=ppr.customer_id) customerName,
+
+    (select housenumber || ',' || street as address from customer where
+customer_id=ppr.customer_id) address,
+
+    (select bill_to from customer where customer_id=ppr.customer_id)
+billTo,
+
+    (select staff_code from staff where staff_id=ppr.staff_id)
+staffCode,
+
+    (select name from staff where staff_id=ppr.staff_id) staffName,
+
+    to_char(ppr.check_date,'dd/MM/yyyy') checkDateStr,
+
+    (select shop_code from shop where shop_id=ppr.shop_id) shopCode,
+
+    ppr.result
+
+    from mt_promotion_program pp
+
+    join mt_promotion_program_result ppr on
+pp.id=ppr.mt_promotion_program_id
+
+    join lstShop ls on ls.shop_id=ppr.shop_id
+
+    where ppr.check_date < trunc(toDate)+1
+
+    and ppr.check_date>=trunc(fromDate)
+
+    ;
+
+ 
+
+END PROC_VT_14;
+
+ 
+
+PROCEDURE PROC_VT_15(res OUT SYS_REFCURSOR ,lstShopId NVARCHAR2)
+
+as
+
+BEGIN
+
+    OPEN res FOR
+
+    with lstShop as(
+
+      select shop_id from shop start with shop_id in
+
+                    (SELECT regexp_substr(lstShopId,'[^,]+', 1, level)
+FROM dual
+
+                      CONNECT BY regexp_substr(lstShopId, '[^,]+', 1,
+level) IS NOT NULL)
+
+        connect by prior shop_id=parent_shop_id
+
+      ),
+
+      lstNV as(
+
+          select nv.staff_id staffId,nv.staff_owner_id staffOwnerId,
+nv.shop_id shopId,nv.role_type roleType,
+
+          nv.staff_code staffCode,nv.name staffName, gs.staff_code
+staffOwnerCode,gs.name staffOwnerName
+
+          from staff nv join staff gs on nv.staff_owner_id=gs.staff_id
+
+          where nv.role_type=1 and gs.role_type=2
+
+          and nv.status=1 and gs.status=1
+
+          and nv.shop_id in (select shop_id from lstShop)
+
+      ),
+
+      lstGS as(
+
+          select staff_id staffId,staff_id staffOwnerId,shop_id
+shopId,role_type roleType,
+
+          staff_code staffCode,name staffName, staff_code
+staffOwnerCode,name staffOwnerName
+
+          from staff where role_type=2  and status=1
+
+          and shop_id in (select shop_id from lstShop)
+
+      )
+
+      select s.*,npp.shop_code shopCode,npp.shop_name shopName,
+
+      (case when mien.shop_code is null then npp.shop_code else
+vung.shop_code end) vung,
+
+      (case when mien.shop_code is null then npp.shop_code else
+mien.shop_code end) mien
+
+      from (
+
+        select * from lstNV nv
+
+        union all
+
+        select * from lstGS gs
+
+      ) s join shop npp on s.shopId=npp.shop_id
+
+      left join shop vung on npp.parent_shop_id=vung.shop_id
